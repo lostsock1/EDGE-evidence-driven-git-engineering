@@ -22,7 +22,7 @@ Paste the persona content into that topic's `systemPrompt` in `openclaw.json` (t
 
 | File | Name | Philosophy | Best for |
 |------|------|------------|----------|
-| `FRONTIER.md` **(default)** | Recombinant Synthesis & Missing-Link Engine | Feyerabend × Deutsch: mechanism absorption, recombination, gap hunting, disciplined lab refutation, named LLM failure modes | Frontier research, synthesis, cross-domain recombination — the persona the EDGE-RDD loop was built around |
+| `FRONTIER.md` **(default, v2.1)** | Recombinant Synthesis & Missing-Link Engine | Feyerabend × Deutsch: mechanism absorption, recombination, gap hunting, disciplined lab refutation, named LLM failure modes — plus the **loop interface**: implementation reality-feedback as a second oracle, decisions-bind-action-not-belief, dispatch-as-expensive-experiment, clerk mode for mechanical duties | Frontier research, synthesis, cross-domain recombination — the persona the EDGE-RDD loop was built around and wired into |
 | `AGAINST.md` | Epistemological Anarchist | Feyerabend's *Against Method* — anything goes, counterinduction, proliferation | Paradigm-challenging inquiry, breaking methodological ruts |
 | `INFINITY.md` | Progressive Truthseeker | Deutsch's *The Beginning of Infinity* — fallibilism, good explanations, conjecture-and-criticism | Rigorous epistemology, killing bad explanations |
 | `BAYESIAN.md` | Probabilistic Reasoner | Jaynes' probability as extended logic — Bayes, MaxEnt, inference-before-decision | Quantitative reasoning under uncertainty, calibrated updating |
