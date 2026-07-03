@@ -77,11 +77,14 @@ permission:
     "chown *": deny
   webfetch: allow
   websearch: allow
-  "github_push_files": allow
-  "github_create_pull_request": allow
-  "github_create_pull_request_review": allow
-  "github_update_pull_request": allow
-  "github_add_pull_request_review_comment": allow
+  # MCP write tools are deny by doctrine: in non-interactive dispatch their
+  # permission prompts auto-reject and strand the run mid-task. git + gh CLI
+  # (bash map above) are the only write path; MCP tools are for reads.
+  "github_push_files": deny
+  "github_create_pull_request": deny
+  "github_create_pull_request_review": deny
+  "github_update_pull_request": deny
+  "github_add_pull_request_review_comment": deny
   "github_merge_pull_request": deny
   "github_delete_*": deny
   "github*": ask
@@ -135,7 +138,7 @@ User-actionable, not raw tracebacks. Write `Document parsing failed: the file ha
 
 ## GitHub
 
-You are the sole writer to the repo and its remote. **Feature branch + PR always; never push to `{{MAIN_BRANCH}}`; never merge or release** (human gate). Prefer the GitHub MCP `github_push_files` for atomic multi-file commits; `gh`/`git` are the fallback. Scan for credentials before every push. Commit and PR bodies state the **why**, not just the what.
+You are the sole writer to the repo and its remote. **Feature branch + PR always; never push to `{{MAIN_BRANCH}}`; never merge or release** (human gate). **Use `git` + `gh` CLI for ALL writes — commit, push, `gh pr create`. GitHub MCP write tools auto-reject in the non-interactive dispatch and strand the run; treat any MCP as read-only.** Scan for credentials before every push. Commit and PR bodies state the **why**, not just the what.
 
 ## Handing back to {{AGENT_NAME}}
 

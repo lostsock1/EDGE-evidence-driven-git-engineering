@@ -182,8 +182,10 @@ run_dispatch() {
 1. BRANCH DISCIPLINE: {{MAIN}} is branch-protected — direct pushes to {{MAIN}}
    are rejected by GitHub. If HEAD is already on a {{PREFIX}}/* branch for this
    task, continue there; otherwise create {{PREFIX}}/<short-task-slug> from
-   {{MAIN}}. Commit there, push it, and OPEN A PULL REQUEST to {{MAIN}}
-   (gh pr create or the github MCP tool). A human merges; never merge yourself.
+   {{MAIN}}. Commit there, push with git, and OPEN A PULL REQUEST to {{MAIN}}
+   using `gh pr create` — NEVER the github MCP write tools (they auto-reject
+   in this non-interactive dispatch and strand the run without a PR).
+   A human merges; never merge yourself.
 2. Write code and tests; verify by reading the code back. Do NOT run tests,
    linters, or type checkers locally — CI runs the full suite on your PR.
    Only list under TESTS-TO-RUN commands CI cannot run.
@@ -250,10 +252,14 @@ from it. Do NOT restart from scratch and do NOT revert existing progress.
     echo "[$(ts)] TRY model=$M timeout=${TO}s" >> "$LOG"
     # --model pins the coder; OPENCODE_CONFIG_CONTENT sets the global model so a
     # model-less reviewer subagent lands on the same tier (covers opencode #17870).
+    # OCRC captures opencode/timeout's own exit code — the pipeline otherwise
+    # reports the JSON parser's status, which masks timeout's 124 and turns
+    # every hard-timeout into "empty-or-error-output" in the ledger.
     ERRTMP="$(mktemp /tmp/edge-coder-stderr.XXXXXX)"
-    OUT="$(cd "$DIR" && OPENCODE_CONFIG_CONTENT="{\"model\":\"$M\"}" \
+    OCRC="$(mktemp /tmp/edge-coder-rc.XXXXXX)"
+    OUT="$( { cd "$DIR" && OPENCODE_CONFIG_CONTENT="{\"model\":\"$M\"}" \
       timeout --signal=TERM --kill-after=30 "$TO" \
-      "$OPENCODE" run --format json --model "$M" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}" 2>>"$ERRTMP" | \
+      "$OPENCODE" run --format json --model "$M" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}"; echo $? >"$OCRC"; } 2>>"$ERRTMP" | \
       python3 -c '
 import sys, json
 texts = []
@@ -282,6 +288,11 @@ if has_error or not has_text:
 print("".join(texts))
 ')"
     RC=$?
+    OPENCODE_RC="$(cat "$OCRC" 2>/dev/null || echo '')"
+    rm -f "$OCRC"
+    # Prefer opencode's own nonzero exit (124/137 = timeout kill) over the
+    # parser's generic 1 when classifying the failure.
+    [ -n "$OPENCODE_RC" ] && [ "$OPENCODE_RC" != 0 ] && [ $RC -ne 0 ] && RC="$OPENCODE_RC"
     cat "$ERRTMP" >> "$LOG" 2>/dev/null
     if [ $RC -ne 0 ]; then
       REASON="$(classify_failure "$RC" "$ERRTMP")"
