@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# protect-branch.sh — apply the EDGE-RDD branch-protection posture to the trunk.
+# protect-branch.sh — apply the EDGE branch-protection posture to the trunk.
 #
 # The human merge gate is MECHANICAL, not behavioral: agents cannot push to the
 # trunk even if a prompt goes wrong, because GitHub rejects it. PRs require

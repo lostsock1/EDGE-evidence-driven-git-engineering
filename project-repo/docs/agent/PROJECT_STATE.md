@@ -9,7 +9,7 @@
 <!-- 3-6 bullets: what phase the project is in, what works today, what is in
      flight, the last landed PR. Date every claim. -->
 
-- YYYY-MM-DD — project initialized from the EDGE-RDD template.
+- YYYY-MM-DD — project initialized from the EDGE (Evidence-Driven Git Engineering) template.
 
 ## Active source-of-truth docs
 

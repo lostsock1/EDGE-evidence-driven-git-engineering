@@ -14,8 +14,8 @@ End-to-end install on a fresh OpenClaw server. Time: ~30–45 min, most of it Gi
 ## 1. Configure
 
 ```bash
-git clone https://github.com/lostsock1/EDGE-research-driven-development
-cd EDGE-research-driven-development
+git clone https://github.com/lostsock1/EDGE-evidence-driven-git-engineering
+cd EDGE-evidence-driven-git-engineering
 cp template.env.example template.env
 $EDITOR template.env        # fill in EVERY value — see comments in the file
 ```

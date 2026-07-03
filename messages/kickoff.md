@@ -1,6 +1,6 @@
 🚀 {{PROJECT_NAME}} — development kickoff
 
-This thread runs the EDGE-RDD loop: research → staging → promotion → frozen work orders → ask-before-dispatch → coders on {{BRANCH_PREFIX}}/* branches → PR → CI → human merge.
+This thread runs the EDGE loop: research → staging → promotion → frozen work orders → ask-before-dispatch → coders on {{BRANCH_PREFIX}}/* branches → PR → CI → human merge.
 
 Wiring already in place:
 • Charter: projects/{{PROJECT_SLUG}}/PROJECT.md (operating loop, dispatch command, boundaries)

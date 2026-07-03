@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kickoff.sh — first-boot handshake for a new EDGE-RDD project thread.
+# kickoff.sh — first-boot handshake for a new EDGE project thread.
 #
 # Run ONCE per project, after install.sh --apply, the openclaw.json merge, the
 # repo docs seed, CI, and branch protection. It:

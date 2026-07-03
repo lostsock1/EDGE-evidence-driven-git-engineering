@@ -1,4 +1,4 @@
-# EDGE — Research Driven Development
+# EDGE — Evidence-Driven Git Engineering
 
 **A complete, battle-tested scaffolding for running an autonomous research → implementation → PR pipeline from a chat thread, on your own server, with a human holding the only merge button.**
 
@@ -21,7 +21,7 @@ This template is extracted from a production setup running commercial-grade soft
 | **Dispatch wrapper** | `scripts/edge-coder-run.sh` | The heart. Async dispatch with per-repo locking, an **ordered model-fallback ladder** (opencode has none natively), per-tier timeouts, failure classification (rate-limit/quota/auth/…), **partial-work handoff** between tiers, mandatory machine-readable completion trailer, automatic completion + CI-verdict push to your chat thread |
 | **Coder agents** | `opencode/agents/code-monkeys/` | Primary coder + independent read-only reviewer + shared doctrine. Permission maps tuned for **non-interactive** dispatch (no `ask` traps), with hard denies on merges, force-pushes, and secrets |
 | **Research agent** | `openclaw/agent.edge.json5`, `openclaw/topic.project-thread.json5` | OpenClaw agent definition + Telegram topic binding with the full async-dispatch operating instructions baked into the system prompt |
-| **Agent workspace** | `workspace-edge/` | Project charter (the 10-point research-driven-development operating loop) + the plain-lingo **communication contract** + RESUME.md restart packet |
+| **Agent workspace** | `workspace-edge/` | Project charter (the 10-point evidence-driven engineering operating loop) + the plain-lingo **communication contract** + RESUME.md restart packet |
 | **Persona library** | `workspace-edge/personas/` | Four swappable operating philosophies for the research agent — **FRONTIER v2.1** (default, seeded into `SOUL.md`; see [The personality](#the-personality-frontier)), AGAINST, INFINITY, BAYESIAN — with the activation mechanism documented (copy over `SOUL.md`; a `PERSONA.md` marker does nothing) |
 | **Repo handoff docs** | `project-repo/docs/agent/` | The git-tracked protocol both sides read: `PROJECT_STATE` · `TASKS` · `QUALITY_GATES` · `KNOWLEDGE_STAGING` · `RESEARCH_TRANSFER` · `EDGE_COLLABORATION` |
 | **GitHub gate** | `github/protect-branch.sh`, `project-repo/.github/workflows/ci.yml.example` | One-command branch protection (required checks, up-to-date branch, no force-push, admins included, 0 approvals — *you* are the approval) |
@@ -57,8 +57,8 @@ Three alternates ship alongside (AGAINST · INFINITY · BAYESIAN — see `worksp
 ## Quickstart
 
 ```bash
-git clone https://github.com/lostsock1/EDGE-research-driven-development
-cd EDGE-research-driven-development
+git clone https://github.com/lostsock1/EDGE-evidence-driven-git-engineering
+cd EDGE-evidence-driven-git-engineering
 cp template.env.example template.env && $EDITOR template.env
 ./install.sh              # render only — review ./rendered/
 ./install.sh --apply      # install with automatic backups

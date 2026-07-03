@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — render the EDGE-RDD template with your values and (optionally)
+# install.sh — render the EDGE template with your values and (optionally)
 # install the results into place.
 #
 #   ./install.sh            render only  -> ./rendered/   (safe, idempotent)

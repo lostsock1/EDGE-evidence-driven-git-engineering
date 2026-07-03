@@ -37,7 +37,7 @@ bash {{HOME}}/.openclaw/shared-scripts/edge-coder-run.sh '<promoted implementati
 - Coders work on `{{BRANCH_PREFIX}}/*` branches and open PRs to `{{MAIN_BRANCH}}` (branch-protected: green required checks, only the human operator merges).
 - Blocking/high implementation discoveries: code-monkeys files them in `{{DOCS_DIR}}/EDGE_COLLABORATION.md`; the wrapper detects and nudges this thread automatically. Normal/background feedback is file-first: {{AGENT_NAME}} picks it up from `EDGE_COLLABORATION.md` during the next research turn.
 
-## Operating loop (research-driven development + GitHub management)
+## Operating loop (evidence-driven engineering + GitHub management)
 
 The standing cycle for this project. **Communication contract for every post here (per USER.md): plain-lingo summary first, then the operator's options with one-line tradeoffs, then ONE recommendation with the why; technical depth after.** Work orders, sweeps, and completion relays all follow it.
 
