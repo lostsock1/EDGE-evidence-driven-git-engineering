@@ -92,13 +92,22 @@ Expected: `opencode model selected: <tier-1>`, a summary, and a `=== LOOP CLOSER
 
 Then from Telegram, in the project topic, ask the research agent to run the same `status` command — this proves the agent → wrapper elevated-exec path.
 
-## 7. First real cycle
+## 7. Kick off the thread
 
-In the project thread:
+```bash
+bash scripts/kickoff.sh            # add --dry-run to preview without sending
+```
 
-> Read the charter and the repo state. Propose the first work order (ID, goal, acceptance criteria, out-of-scope) and wait for my go.
+This **preflights the GitHub connection** — authenticated `gh`, reachable repo, local clone whose origin matches, protected trunk (warns if not), seeded handoff docs — then posts two messages into the project thread, rendered with your values:
 
-Then say **go**, watch the `DISPATCHED <run-id>` reply, the ✅ completion message, the CI verdict — and merge the PR on GitHub. That's the loop.
+- the **development kickoff**: tells the agent to read its charter + repo state and propose the first work order, then wait for your go;
+- the **command palette** — *pin this one* (long-press → Pin). It's the day-to-day driving surface: `status`, `go`, `next`, `work order for <thing>`, `research`, `promote`, `sweep`, `merged`, `what happened`, …
+
+The GitHub repo is an expected precondition by design: kicking off a thread whose repo isn't wired strands the agent at its first dispatch. For a second project on the same server, run it with that project's config: `EDGE_RDD_CONFIG=~/.config/edge-rdd/<project>.env bash scripts/kickoff.sh`.
+
+## 8. First real cycle
+
+The kickoff already asked the agent to propose the first work order. Reply **go**, watch the `DISPATCHED <run-id>` reply, the ✅ completion message, the CI verdict — and merge the PR on GitHub. That's the loop.
 
 ## Updating later
 

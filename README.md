@@ -26,6 +26,7 @@ This template is extracted from a production setup running commercial-grade soft
 | **Repo handoff docs** | `project-repo/docs/agent/` | The git-tracked protocol both sides read: `PROJECT_STATE` · `TASKS` · `QUALITY_GATES` · `KNOWLEDGE_STAGING` · `RESEARCH_TRANSFER` · `EDGE_COLLABORATION` |
 | **GitHub gate** | `github/protect-branch.sh`, `project-repo/.github/workflows/ci.yml.example` | One-command branch protection (required checks, up-to-date branch, no force-push, admins included, 0 approvals — *you* are the approval) |
 | **Installer** | `install.sh`, `template.env.example` | Fill one env file, render, review, `--apply` with automatic backups |
+| **Thread bootstrap** | `scripts/kickoff.sh`, `messages/` | One-shot first-boot handshake: **preflights the GitHub connection** (gh auth, reachable repo, matching clone, protection), then posts the development-kickoff + pinnable **command palette** into the project thread |
 
 ## The five ideas that make it work
 
@@ -43,6 +44,8 @@ cd EDGE-research-driven-development
 cp template.env.example template.env && $EDITOR template.env
 ./install.sh              # render only — review ./rendered/
 ./install.sh --apply      # install with automatic backups
+bash scripts/kickoff.sh   # after the GitHub steps — verifies the repo connection,
+                          # then posts the kickoff + pinnable command palette
 ```
 
 Then follow **[docs/SETUP.md](docs/SETUP.md)** for the OpenClaw merge, CI, branch protection, and the smoke test. Read **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the why behind every design decision, and **[docs/OPERATIONS.md](docs/OPERATIONS.md)** for daily driving and troubleshooting.

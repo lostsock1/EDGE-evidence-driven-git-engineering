@@ -160,5 +160,7 @@ if [ "$APPLY" = 1 ]; then
   echo "4. Copy project-repo/.github/workflows/ci.yml.example into your repo as .github/workflows/ci.yml and adapt"
   echo "5. bash github/protect-branch.sh   (after CI ran once so the check contexts exist)"
   echo "6. Smoke test: bash $RDD_HOME/.openclaw/shared-scripts/edge-coder-run.sh status"
+  echo "7. Kick off the thread: bash scripts/kickoff.sh (preflights the GitHub connection,"
+  echo "   then posts the development-kickoff + pinnable command-palette messages)"
   echo "See docs/SETUP.md for the full walkthrough."
 fi
