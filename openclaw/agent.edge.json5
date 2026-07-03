@@ -1,0 +1,49 @@
+// EDGE research agent — merge this object into agents.list[] in ~/.openclaw/openclaw.json
+// (JSON5: comments + trailing commas allowed). Restart the gateway afterwards:
+//   systemctl --user restart openclaw-gateway
+{
+  id: "{{AGENT_ID}}",
+  name: "{{AGENT_NAME}}",
+  workspace: "{{HOME}}/.openclaw/workspace-{{AGENT_ID}}",
+
+  // Make the agent's OWN notes searchable via memory_search — without this the
+  // agent only sees the default memory index and is blind to its research notes.
+  memorySearch: {
+    extraPaths: [
+      "{{HOME}}/.openclaw/workspace-{{AGENT_ID}}/notes",
+      "{{HOME}}/.openclaw/workspace-{{AGENT_ID}}/projects",
+    ],
+  },
+
+  model: {
+    primary: "{{EDGE_MODEL_PRIMARY}}",
+    // Order matters. WARNING: a user-pinned session model (/model in chat)
+    // silently disables this ENTIRE fallback chain — a 429 then surfaces as a
+    // hard error. Clear stale pins from the agent's sessions.json if a model
+    // "mysteriously" stops failing over.
+    fallbacks: [
+      "deepseek/deepseek-v4-pro",
+    ],
+  },
+
+  skills: ["github", "gh-issues"],
+  sandbox: { mode: "off" },
+
+  tools: {
+    profile: "coding",
+    alsoAllow: ["message", "group:messaging"],
+    // Elevated exec (needed to run the dispatch wrapper) ONLY for the human
+    // operator's own account — never open this to a whole group.
+    elevated: {
+      enabled: true,
+      allowFrom: { telegram: ["{{OPERATOR_TG_USER_ID}}"] },
+    },
+    fs: { workspaceOnly: true },
+  },
+
+  identity: {
+    name: "{{AGENT_NAME}}",
+    theme: "truth-seeking research operator",
+    emoji: "⚡",
+  },
+}

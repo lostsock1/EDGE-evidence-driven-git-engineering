@@ -1,0 +1,39 @@
+# Example CI for the protected trunk. ADAPT the jobs to your stack.
+#
+# CRITICAL: the job `name:` values below are the "check contexts" GitHub
+# branch protection requires (see github/protect-branch.sh and
+# RDD_REQUIRED_CHECKS in template.env). If you rename a job, update the
+# protection rule — otherwise every PR blocks forever on a check that no
+# longer exists.
+#
+# Also make sure `branches:` matches your protected trunk. A CI that still
+# triggers on a deleted/renamed branch runs never — and nobody notices until
+# a bad merge. (This exact failure mode is why the template ships this note.)
+
+name: CI
+on:
+  pull_request:
+    branches: [main]        # <- your RDD_MAIN_BRANCH
+  push:
+    branches: [main]        # <- your RDD_MAIN_BRANCH
+
+jobs:
+  tests:
+    name: tests             # <- must equal a required check context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e .[dev]
+      - run: python -m pytest -x -q
+
+  lint:
+    name: lint              # <- must equal a required check context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff
+      - run: ruff check .

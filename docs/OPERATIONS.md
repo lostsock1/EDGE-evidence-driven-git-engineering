@@ -1,0 +1,80 @@
+# Operations
+
+Day-to-day driving, message anatomy, and troubleshooting.
+
+## Short commands that keep the loop running
+
+Send these to the research agent in the project thread:
+
+| You say | It does |
+|---|---|
+| `status` | resume from disk (RESUME.md + repo state), report plainly |
+| `research <topic/link>` | research, distill to mechanisms, stage what matters |
+| `propose` | turn the best staged finding into a work order and post it for your go |
+| `go` | dispatch the posted work order to the coders |
+| `sweep` | GitHub hygiene pass: open PRs, stale branches, failed runs, doc drift |
+| `answer requests` | work the open items in EDGE_COLLABORATION.md |
+
+The agent must always reply in the contract shape: plain-lingo summary → your options with tradeoffs → one recommendation with the why.
+
+## Reading the completion message
+
+```
+✅ coder dispatch run-20260703-064023-14383 done on `openai/gpt-5.5`
+fallback path: gpt-5.5: rate-limited → deepseek-v4-pro      <- only when tiers failed
+branch: cm/qdq-retrieval-parity
+PR: https://github.com/you/repo/pull/12
+trailer: yes
+commits:
+a1b2c3d Add retrieval parity eval script
+full output: ~/.local/state/edge-rdd/runs/run-...log
+```
+
+- **model line** — which tier actually did the work; a fallback is never silent.
+- **PR: none + no commits** — the run was likely beheaded (see troubleshooting) or the coder stopped at a research boundary; check the run log and `EDGE_COLLABORATION.md`.
+- **trailer: MISSING** — the model skipped the mandatory status trailer; the wrapper's own git/PR facts above are still reliable, but treat the model's prose claims with suspicion.
+- **⚠️ OPEN EDGE request(s)** — the coder handed research back; that's the loop working, not a failure. EDGE answers, promotes, re-dispatches.
+
+Then, minutes later: `✅ PR #12 CI: all checks green — ready for human merge.` — that's your cue. Merging is always yours.
+
+## Failure classifications (ledger + failure messages)
+
+| Label | Meaning | Usual action |
+|---|---|---|
+| `rate-limited` | provider 429 | none — next tier already took over |
+| `quota/billing` | credits exhausted / 402 | top up that provider |
+| `auth` | key invalid/revoked | rotate the key in opencode config |
+| `provider-overloaded` | 503/529 capacity | none — retry later or rely on tiers |
+| `hard-timeout` | tier hit its RDD_TIMEOUTS_* ceiling | task too big? split the work order |
+| `provider-error` | opencode error event | read the run log |
+| `empty-or-error-output` | model returned nothing usable | read the run log; often a model-side stall |
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Dispatch refused: `a dispatch is already running` (exit 3) | per-repo lock held | wait for its completion message, or `edge-coder-run.sh status` to see the holder; a crashed worker releases the lock on process exit |
+| Completion shows `trailer: MISSING`, `PR: none`, no commits | run beheaded mid-task — most often an `ask` permission auto-rejecting in non-interactive mode | grep the run log for `auto-rejecting`; flip that permission to `allow` (safety lives in branch protection) or to `deny` if it truly must not happen |
+| Wrapper refuses: `$HOME/.git exists` | stray git repo at home dir | `rm -rf $HOME/.git` (verify it's stray first!) |
+| All tiers `rate-limited`/`quota` | provider account issue | fix billing/keys; the failure message names each tier's reason |
+| Coder "succeeded" but pushed nothing | it committed on the wrong branch or left work uncommitted | the completion message says exactly that; re-dispatch — the partial-work handoff tells the next run to continue, not restart |
+| PR blocked on a check that never runs | required context name ≠ CI job name (renamed job?) | fix the name in ci.yml or re-run `github/protect-branch.sh` with the new contexts |
+| CI never triggers | workflow `branches:` filter points at an old/renamed trunk | update `on.push/pull_request.branches` |
+| Agent's model failover stopped working | user-pinned session model disables the fallback chain | remove `modelOverride*` from the agent's `sessions.json` with the gateway stopped |
+| Chat pushes not arriving | `RDD_TG_TARGET` empty/wrong, or gateway PATH missing the openclaw CLI | check the ledger (`RDD_LOG`) — `send_tg` failures land there |
+
+## Log locations
+
+- **Ledger** (one line per event): `RDD_LOG` — dispatches, tier tries/fails with reasons, CI verdicts, lock refusals.
+- **Per-run full output**: `RDD_RUNS_DIR/<run-id>.log` — everything the coder said and the loop closer.
+- `edge-coder-run.sh status` — lock state, last 5 runs, ledger tail.
+
+## Rollback
+
+- Wrapper/agents: timestamped backups in `~/.config/edge-rdd/backups/` — copy back and re-run.
+- OpenClaw config: your own backup from the setup step; `openclaw config validate` before restart.
+- Branch protection off (emergencies only): `gh api -X DELETE repos/OWNER/REPO/branches/BRANCH/protection`
+
+## Weekly hygiene (or just tell the agent: `sweep`)
+
+open PRs · `cm/*` branches with no PR · failed scheduled workflow runs · `TASKS.md` boxes vs reality · `PROJECT_STATE.md` truthfulness · wrapper ledger for repeated tier failures (a persistently failing tier deserves demotion in `RDD_MODELS`).
