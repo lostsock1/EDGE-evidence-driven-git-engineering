@@ -62,6 +62,7 @@ Then, minutes later: `✅ PR #12 CI: all checks green — ready for human merge.
 | CI never triggers | workflow `branches:` filter points at an old/renamed trunk | update `on.push/pull_request.branches` |
 | Agent's model failover stopped working | user-pinned session model disables the fallback chain | remove `modelOverride*` from the agent's `sessions.json` with the gateway stopped |
 | Chat pushes not arriving | `RDD_TG_TARGET` empty/wrong, or gateway PATH missing the openclaw CLI | check the ledger (`RDD_LOG`) — `send_tg` failures land there |
+| Gate approval **button renders but tapping does nothing** (no inbound event in the logs) | Telegram `capabilities.inlineButtons` is at its `allowlist` default, which drops the callback | set `channels.telegram.capabilities.inlineButtons: "all"` (or `"group"`) and restart — see SETUP §4. Meanwhile `👍`/`approve` replies still work |
 
 ## Log locations
 

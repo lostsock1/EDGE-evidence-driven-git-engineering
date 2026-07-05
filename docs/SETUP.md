@@ -58,7 +58,24 @@ This installs (with timestamped backups under `~/.config/edge-rdd/backups/`):
    gateway rely on default heartbeats, give each of them an explicit
    `heartbeat: { every: "30m" }` (that preserves the default exactly).
 3. Merge `rendered/openclaw/topic.project-thread.json5` into your Telegram group's `topics` map.
-4. Validate and restart:
+4. **Enable inline-button callbacks (required for the gate's tap-to-approve).**
+   Telegram's `capabilities.inlineButtons` defaults to `allowlist`, which
+   silently drops the gate's approval-button taps — the button renders but a tap
+   produces *no inbound event at all*. Set it explicitly on the telegram channel:
+
+   ```json5
+   channels: {
+     telegram: {
+       capabilities: { inlineButtons: "all" },  // or "group" if the gate thread is a group
+       // ...
+     },
+   }
+   ```
+
+   Without this, approvals only work via a `👍`/`approve` reply, not the buttons.
+   A tapped button is delivered to the agent as the text `callback_data: eg:<id>`
+   (the topic prompt already tells the agent to handle that form).
+5. Validate and restart:
 
 ```bash
 openclaw config validate

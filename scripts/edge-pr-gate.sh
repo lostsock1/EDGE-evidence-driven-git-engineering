@@ -329,6 +329,21 @@ def gather(proj):
 
 # ---- sweep --------------------------------------------------------------------
 
+def ack_text(a):
+    """Instant 'on it' feedback posted the moment an approval is acted, before
+    the slow gh calls — so a tap is never met with silence."""
+    k = a["kind"]
+    if k == "merge":
+        return (f"⏳ On it — merging PR #{a['pr']} into {a['trunk']} and cleaning up "
+                f"{a['branch']}. I'll confirm in a moment.")
+    if k == "prune":
+        return f"⏳ On it — deleting branch {a['branch']}. Confirming shortly."
+    if k == "batch":
+        return (f"⏳ On it — running every approved item for {a['label']} now; "
+                f"I'll post the result when they finish.")
+    return ""
+
+
 def action_explainer(a):
     """The per-action human brief: What it does / Consequence / Why it's offered.
     Plain text (no markdown emphasis — Telegram MarkdownV2 would choke on the
@@ -571,7 +586,12 @@ def find_proj(action):
 
 
 def act(aid):
-    aid = aid.strip().removeprefix("eg:")
+    # Accept the raw button payload too: a tapped inline button is delivered as
+    # "callback_data: eg:<id>", and the operator may paste "eg:<id>" or just "<id>".
+    aid = aid.strip()
+    if aid.lower().startswith("callback_data:"):
+        aid = aid.split(":", 1)[1].strip()
+    aid = aid.removeprefix("eg:").strip()
     with Locked():
         state = load_state()
         a = state["actions"].get(aid)
@@ -587,6 +607,11 @@ def act(aid):
         if not proj:
             print(f"FAILED project config for {a['label']} no longer exists")
             sys.exit(4)
+
+        # Quick feedback: acknowledge the approval immediately, before the slow
+        # gh merge/delete calls, so the operator never taps into silence.
+        if a["kind"] != "snooze":
+            send_message(hub_dest(), ack_text(a))
 
         if a["kind"] == "batch":
             # "Do all of the above": execute EVERY still-pending merge/prune for
