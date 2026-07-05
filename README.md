@@ -2,14 +2,15 @@
 
 **A complete, battle-tested scaffolding for running an autonomous research → implementation → PR pipeline from a chat thread, on your own server, with a human holding the only merge button.**
 
-One Telegram thread. A research agent (**EDGE**, running in [OpenClaw](https://openclaw.ai), animated by the **FRONTIER** persona — a truth-seeking operating philosophy that pre-registers its experiments and prizes refutation over confirmation) that studies your project, drafts work orders, and asks for your *go*. A coder team (**code-monkeys**, running in [opencode](https://opencode.ai)) that implements on feature branches and opens PRs. GitHub branch protection + CI as the mechanical quality gate. You read a plain-language summary on your phone and tap **merge**.
+One Telegram thread. A research agent (**EDGE**, running in [OpenClaw](https://openclaw.ai), animated by the **FRONTIER** persona — a truth-seeking operating philosophy that pre-registers its experiments and prizes refutation over confirmation) that studies your project, drafts work orders, and asks for your *go*. A coder team (**code-monkeys**, running in [opencode](https://opencode.ai)) that implements on feature branches and opens PRs. GitHub branch protection + CI as the mechanical quality gate. You read a plain-language summary on your phone and tap **merge** — in the GitHub UI, or right in the thread on a **PR-gate approval button** the 6-hourly sweep posts for you (the agent executes the merge, but only after your tap).
 
 ```text
 you (Telegram) ──"go"──▶ EDGE ──dispatch──▶ wrapper ──tier ladder──▶ coder ──▶ PR
       ▲                                       │                                │
       │◀── plain-lingo summary + options ─────┘◀── ✅ done (model/branch/PR) ───┤
       │◀────────────────────────────────────────── ✅ CI green, ready to merge ─┘
-      └── merge on GitHub (the only unprotected write path is yours)
+      └── you approve — merge on GitHub, or one tap on the gate's ✅ button
+          (approval stays yours; the agent only executes it)
 ```
 
 This template is extracted from a production setup running commercial-grade software development through this exact loop. Every guard in it exists because the unguarded version failed at least once.
@@ -27,6 +28,7 @@ This template is extracted from a production setup running commercial-grade soft
 | **Persona library** | `workspace-edge/personas/` | Four swappable operating philosophies for the research agent — **FRONTIER v2.1** (default, seeded into `SOUL.md`; see [The personality](#the-personality-frontier)), AGAINST, INFINITY, BAYESIAN — with the activation mechanism documented (copy over `SOUL.md`; a `PERSONA.md` marker does nothing) |
 | **Repo handoff docs** | `project-repo/docs/agent/` | The git-tracked protocol both sides read: `PROJECT_STATE` · `TASKS` · `QUALITY_GATES` · `KNOWLEDGE_STAGING` · `RESEARCH_TRANSFER` · `EDGE_COLLABORATION` |
 | **GitHub gate** | `github/protect-branch.sh`, `project-repo/.github/workflows/ci.yml.example` | One-command branch protection (required checks, up-to-date branch, no force-push, admins included, 0 approvals — *you* are the approval) |
+| **PR gate** | `scripts/edge-pr-gate.sh`, `workspace-edge/HEARTBEAT.md` | Every 6h a heartbeat sweep checks every project repo — green PRs, CI verdicts, stray branches — and posts **one-tap approval buttons** into each project's thread. You tap ✅ (or react 👍), the agent re-verifies and executes the merge / branch cleanup, and every repo converges back to **trunk-only**. See [The PR gate](#the-pr-gate-approve-merges-with-one-tap) |
 | **Installer** | `install.sh`, `template.env.example` | Fill one env file, render, review, `--apply` with automatic backups |
 | **Thread bootstrap** | `scripts/kickoff.sh`, `messages/` | One-shot first-boot handshake: **preflights the GitHub connection** (gh auth, reachable repo, matching clone, protection), then posts the development-kickoff + pinnable **command palette** into the project thread |
 
@@ -34,9 +36,24 @@ This template is extracted from a production setup running commercial-grade soft
 
 1. **Files are the protocol, chat is the trigger.** Work orders, promoted research, research requests, and reality feedback live in git-tracked docs both runtimes read. The loop survives restarts, context compaction, and model swaps.
 2. **Research and implementation never blur.** The research agent cannot touch git; the coder cannot originate architecture decisions. Each hands off through explicit, templated documents — including *reality feedback* when a proposal loses to the real codebase (the anti-hallucination loop).
-3. **The human gate is mechanical.** Agents physically cannot push to the trunk — GitHub rejects it. Everything lands as a PR with green required checks, and only the operator merges. This is why agent permissions can be permissive enough to actually work unattended.
+3. **The human gate is mechanical.** Agents physically cannot push to the trunk — GitHub rejects it. Everything lands as a PR with green required checks, and nothing merges without the operator's explicit approval — in the GitHub UI, or with one tap on a [PR-gate button](#the-pr-gate-approve-merges-with-one-tap) (the agent executes, but only after your tap). This is why agent permissions can be permissive enough to actually work unattended.
 4. **Fallback is owned, visible, and resumable.** The wrapper's model tier ladder classifies every failure (`rate-limited → deepseek-v4-pro` in the completion message), and a failed tier's partial work is handed to the next tier with "continue, don't restart".
 5. **Trust nothing you can verify.** The wrapper checks the completion trailer mechanically, resolves branch/commits/PR from git itself, and posts what actually happened — not what the model claims happened.
+
+## The PR gate: approve merges with one tap
+
+The loop ends at a human decision — but that decision shouldn't require opening GitHub. Every 6 hours (a task interval in `workspace-edge/HEARTBEAT.md`, riding OpenClaw's heartbeat), `scripts/edge-pr-gate.sh sweep` checks **every** configured project — projects are simply the `*.env` files in `~/.config/edge-rdd/`, the same ones the dispatch wrapper reads, so there is no second registry to drift — and for each repo looks at:
+
+- **open PRs** and their CI verdict (green / red / pending / draft),
+- **every non-trunk branch**, classified: active PR head · leftover of a merged/closed PR · orphan with or without unique commits.
+
+Anything actionable — a green PR ready to merge, a stale branch to prune — becomes a **single-use pending action**, and the sweep posts one approval message per project into that project's own thread, with an inline button per action plus a snooze. Unchanged asks are not re-posted for 24h; a clean project posts nothing. The declared goal is **trunk-only repos**: merged work in, dead branches gone.
+
+**Approving is one tap.** A button tap delivers its callback (`eg:<id>`) to the research agent, which runs `edge-pr-gate.sh act <id>`. A 👍/✅ reaction on the gate message — or replying "approve" — works too (`pending` resolves which action; if it's ambiguous the agent asks). `act` then **re-verifies at execution time** — PR still open, checks still green, branch still stale — and only then executes (`gh pr merge --squash --delete-branch`, or a remote branch delete), posts the outcome back, and burns the action id.
+
+**What did NOT change:** nothing merges without your explicit approval. The approval surface moved from the GitHub UI to a button in your chat; the executor moved from your thumb to the agent — *after* your tap. Actions are minted only by the sweep from observed repo state, are single-use, re-verify before executing (a stale button can never merge a PR whose CI went red), and the agent is under doctrine to never run `gh pr merge` or delete branches outside `act`. Red and pending-CI PRs are never offered as actions — they ride the normal `fix the red PR` loop.
+
+On-demand: `gate sweep` (run it now), `gate pending` (list open asks), `gate status` (pending + recent results). Dry-run everything with `edge-pr-gate.sh sweep --dry-run`.
 
 ## Two tracks: what ships vs. the north star
 
@@ -93,6 +110,8 @@ Linux server · [OpenClaw](https://docs.openclaw.ai) gateway with a Telegram cha
 | `propose` | best staged finding becomes a work order, posted for your approval |
 | `go` | `DISPATCHED run-…` in seconds; ✅ completion + CI verdict arrive on their own |
 | `sweep` | GitHub hygiene: open PRs, stale branches, failed runs, doc drift |
+| `gate sweep` | run the PR gate now — approval buttons for green PRs / stale branches (auto every 6h) |
+| `gate pending` | list open gate asks; tap a button, react 👍, or say "approve" to execute one |
 | `status` | resume from disk, plain-language state of everything |
 
 Every substantive reply follows the communication contract: **plain-lingo summary → your options with tradeoffs → one recommendation with the why** — technical depth after.
@@ -110,7 +129,7 @@ Every substantive reply follows the communication contract: **plain-lingo summar
 
 ## Safety posture
 
-Permissions stay **ON** everywhere — `--dangerously-skip-permissions` is forbidden by doctrine and unnecessary by design. Secrets (`.env*`, `**/secrets/**`, `**/.ssh/**`, `**/credentials/**`) are hard-denied at read *and* edit level in every agent. Merges, releases, force-pushes, and history rewrites are denied to agents and rejected by GitHub. Elevated chat-exec is allowlisted to the operator's own account id only.
+Permissions stay **ON** everywhere — `--dangerously-skip-permissions` is forbidden by doctrine and unnecessary by design. Secrets (`.env*`, `**/secrets/**`, `**/.ssh/**`, `**/credentials/**`) are hard-denied at read *and* edit level in every agent. Merges, releases, force-pushes, and history rewrites are denied to agents and rejected by GitHub. Elevated chat-exec is allowlisted to the operator's own account id only. The PR gate does not weaken this: a merge still requires the operator's explicit tap, executes only through single-use, re-verified gate actions, and the coder agents' own merge denies stay in place.
 
 ## License
 

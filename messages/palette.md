@@ -13,6 +13,8 @@
 
 🚢 SHIP & REPO
 • sweep — open PRs, stale branches, failed workflows, TASKS drift → one status post
+• gate sweep — PR gate now: green PRs + stale branches → approval buttons here (auto every 6h)
+• gate pending — list open gate asks (tap a button, react 👍, or say "approve" to execute one)
 • fix the red PR — work order referencing the failing check → go-gate → dispatch
 • merged — post-merge closeout: TASKS checkboxes, RESUME.md, EDGE_COLLABORATION answers
 • docs true? — verify PROJECT_STATE/TASKS/README against {{MAIN_BRANCH}}; drift becomes a work order
@@ -22,4 +24,4 @@
 • what happened — read last run log + CI, explain the failure plainly
 • re-read PROJECT.md — re-sync a live session after any rule change
 
-Flow: next → go → (auto: DISPATCHED → completion + PR → CI verdict) → human taps merge → merged.
+Flow: next → go → (auto: DISPATCHED → completion + PR → CI verdict) → you approve the merge (GitHub UI, or one tap on the gate's ✅ button) → merged.

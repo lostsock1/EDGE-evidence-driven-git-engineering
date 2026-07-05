@@ -52,6 +52,11 @@ This installs (with timestamped backups under `~/.config/edge-rdd/backups/`):
 
 1. Back up first: `cp ~/.openclaw/openclaw.json ~/.openclaw/backups/openclaw.json.$(date +%Y%m%d_%H%M%S)`
 2. Merge `rendered/openclaw/agent.edge.json5` into `agents.list[]`.
+   **Heartbeat caveat:** the snippet includes a `heartbeat` block (it powers the
+   PR gate's 6h sweep). In OpenClaw, the moment ANY agent defines a `heartbeat`
+   block, agents WITHOUT one stop running heartbeats — if other agents on this
+   gateway rely on default heartbeats, give each of them an explicit
+   `heartbeat: { every: "30m" }` (that preserves the default exactly).
 3. Merge `rendered/openclaw/topic.project-thread.json5` into your Telegram group's `topics` map.
 4. Validate and restart:
 
@@ -91,6 +96,18 @@ EDGE_CODER_DRYRUN_MSG=1 bash ~/.openclaw/shared-scripts/edge-coder-run.sh --fg \
 Expected: `opencode model selected: <tier-1>`, a summary, and a `=== LOOP CLOSER ===` block with `trailer: yes`.
 
 Then from Telegram, in the project topic, ask the research agent to run the same `status` command — this proves the agent → wrapper elevated-exec path.
+
+PR gate dry run (no messages sent, nothing executed):
+
+```bash
+bash ~/.openclaw/shared-scripts/edge-pr-gate.sh sweep --dry-run
+```
+
+Expected: one block per configured project listing PRs/branches, the actions it
+*would* offer as buttons, and `ALL_CLEAN` at the end if the repos are trunk-only.
+The real sweep runs from the agent's heartbeat every 6h (see
+`workspace-edge/HEARTBEAT.md`); approvals are described in
+[OPERATIONS.md](OPERATIONS.md#the-pr-gate-approve-merges-from-your-phone).
 
 ## 7. Kick off the thread
 

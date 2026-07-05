@@ -101,6 +101,11 @@ if [ "$APPLY" = 1 ]; then
   install -m 0755 scripts/edge-coder-run.sh "$RDD_HOME/.openclaw/shared-scripts/edge-coder-run.sh"
   echo "installed: $RDD_HOME/.openclaw/shared-scripts/edge-coder-run.sh"
 
+  # 2b. PR gate (verbatim — discovers projects from ~/.config/edge-rdd/*.env)
+  backup "$RDD_HOME/.openclaw/shared-scripts/edge-pr-gate.sh"
+  install -m 0755 scripts/edge-pr-gate.sh "$RDD_HOME/.openclaw/shared-scripts/edge-pr-gate.sh"
+  echo "installed: $RDD_HOME/.openclaw/shared-scripts/edge-pr-gate.sh"
+
   # 3. opencode agents
   mkdir -p "$RDD_HOME/.config/opencode/agents/code-monkeys"
   for f in rendered/opencode/agents/code-monkeys/*; do
@@ -141,6 +146,15 @@ if [ "$APPLY" = 1 ]; then
   cp rendered/workspace-edge/templates/north-star-spec.md "$WS/templates/north-star-spec.md"
   echo "installed: north-star spec template -> $WS/templates/north-star-spec.md"
 
+  # 4e. HEARTBEAT.md — the PR gate's 6h sweep task. Seed once; the operator
+  # tunes intervals/tasks in place afterwards, so never overwrite a live one.
+  if [ ! -f "$WS/HEARTBEAT.md" ]; then
+    cp rendered/workspace-edge/HEARTBEAT.md "$WS/HEARTBEAT.md"
+    echo "installed: HEARTBEAT.md -> $WS/HEARTBEAT.md (PR-gate sweep every 6h)"
+  else
+    echo "kept existing: $WS/HEARTBEAT.md (diff against rendered/ manually)"
+  fi
+
   # 4b. persona library + SOUL.md (the agent's operating philosophy).
   # SOUL.md is the OpenClaw-loaded bootstrap file; PERSONA.md is a non-loaded
   # marker — see workspace-edge/personas/README.md. Never overwrite a live SOUL.md.
@@ -177,6 +191,7 @@ if [ "$APPLY" = 1 ]; then
   echo "4. Copy project-repo/.github/workflows/ci.yml.example into your repo as .github/workflows/ci.yml and adapt"
   echo "5. bash github/protect-branch.sh   (after CI ran once so the check contexts exist)"
   echo "6. Smoke test: bash $RDD_HOME/.openclaw/shared-scripts/edge-coder-run.sh status"
+  echo "   PR gate:    bash $RDD_HOME/.openclaw/shared-scripts/edge-pr-gate.sh sweep --dry-run"
   echo "7. Kick off the thread: bash scripts/kickoff.sh (preflights the GitHub connection,"
   echo "   then posts the development-kickoff + pinnable command-palette messages)"
   echo "See docs/SETUP.md for the full walkthrough."

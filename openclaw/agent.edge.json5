@@ -29,6 +29,20 @@
   skills: ["github", "gh-issues"],
   sandbox: { mode: "off" },
 
+  // Heartbeat — powers the PR gate's periodic GitHub sweep (the 6h task lives
+  // in workspace HEARTBEAT.md; ticks with no due task skip without an API call).
+  // WARNING: the moment ANY agent defines a heartbeat block, agents WITHOUT one
+  // stop running heartbeats. If other agents on this gateway rely on default
+  // heartbeats, give each an explicit block too — `heartbeat: { every: "30m" }`
+  // preserves the default behavior exactly.
+  heartbeat: {
+    every: "30m",
+    target: "telegram",
+    // Heartbeat alerts (the sweep's cross-project summary) land here; the
+    // per-project approval-button messages go to each project's own thread.
+    to: "{{TG_TARGET}}:topic:{{TG_THREAD}}",
+  },
+
   tools: {
     profile: "coding",
     alsoAllow: ["message", "group:messaging"],

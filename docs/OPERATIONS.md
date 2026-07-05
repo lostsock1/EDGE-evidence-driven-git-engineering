@@ -93,6 +93,31 @@ EDGE_RDD_CONFIG=~/.config/edge-rdd/<project>.env \
 bash ~/.openclaw/shared-scripts/edge-coder-run.sh --dir <other-repo-root> '<task>'
 ```
 
+## The PR gate: approve merges from your phone
+
+Every 6h (task interval in `workspace-edge/HEARTBEAT.md`) the agent runs
+`edge-pr-gate.sh sweep`: every project config in `~/.config/edge-rdd/*.env` is
+checked on GitHub — open PRs + CI verdict, and every non-trunk branch. Green
+PRs and stale branches become **single-use pending actions**, posted to the
+project's own thread as one message with an inline button per action
+(plus ⏸ snooze). Unchanged asks are not re-posted for 24h. Goal: **trunk-only repos**.
+
+Approve with one tap (the button), a 👍/✅ reaction, or by replying `approve`.
+The agent then runs `act <id>`, which **re-verifies** (PR still open, checks
+still green, branch still stale) before executing `gh pr merge --squash
+--delete-branch` (or the branch delete), posts the outcome, and burns the id.
+A refused/stale action explains itself and does nothing.
+
+| You type | What happens |
+|---|---|
+| `gate sweep` | run the sweep now (heartbeat does it every 6h anyway) |
+| `gate pending` | list open asks with their `eg:<id>` handles |
+| `gate status` | pending + the last few executed/failed actions |
+
+State + audit log: `~/.local/state/edge-rdd/pr-gate/` (`state.json`, `gate.log`).
+Knobs (merge strategy, re-ask window, button cap): `RDD_GATE_*` in `template.env.example`.
+Red / pending-CI PRs are never offered as gate actions — they ride `fix the red PR`.
+
 ## Weekly hygiene (or just tell the agent: `sweep`)
 
 open PRs · `cm/*` branches with no PR · failed scheduled workflow runs · `TASKS.md` boxes vs reality · `PROJECT_STATE.md` truthfulness · wrapper ledger for repeated tier failures (a persistently failing tier deserves demotion in `RDD_MODELS`).
