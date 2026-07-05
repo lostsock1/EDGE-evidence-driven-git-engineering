@@ -64,9 +64,17 @@
 
 set -uo pipefail
 
+# gh/python3 often live outside a systemd-spawned PATH (gateway exec). Prepend
+# RDD_GATE_PATH_PREPEND, falling back to the default project config's
+# RDD_PATH_PREPEND — the dispatch wrapper's own mechanism for the same problem.
+GATE_CFG_DIR="${RDD_GATE_CONFIG_DIR:-$HOME/.config/edge-rdd}"
+if [ -z "${RDD_GATE_PATH_PREPEND:-}" ] && [ -f "$GATE_CFG_DIR/config.env" ]; then
+  RDD_GATE_PATH_PREPEND="$(sed -n 's/^RDD_PATH_PREPEND=//p' "$GATE_CFG_DIR/config.env" | tail -1 | tr -d '"'"'"'')"
+fi
+[ -n "${RDD_GATE_PATH_PREPEND:-}" ] && export PATH="$RDD_GATE_PATH_PREPEND:$PATH"
+
 command -v gh >/dev/null 2>&1 || { echo "edge-pr-gate: gh CLI not found in PATH" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "edge-pr-gate: python3 not found" >&2; exit 2; }
-[ -n "${RDD_GATE_PATH_PREPEND:-}" ] && export PATH="$RDD_GATE_PATH_PREPEND:$PATH"
 
 exec python3 - "$@" <<'PY'
 import fcntl, hashlib, json, os, re, secrets, shlex, subprocess, sys, time
