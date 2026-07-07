@@ -56,6 +56,8 @@
 #         $RDD_RUNS_DIR/<id>.log  (full per-run output)
 
 set -uo pipefail
+# Source OpenClaw .env for API keys (alibaba-token-plan, etc.)
+[ -f "$HOME/.openclaw/.env" ] && source "$HOME/.openclaw/.env"
 
 # ---- configuration --------------------------------------------------------
 # Auto-detect config: scan for .env files with RDD_REPO_DIR if not explicit.
