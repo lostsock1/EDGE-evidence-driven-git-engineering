@@ -26,6 +26,7 @@ This is NOT optional. It is the default operating mode. A research note without 
 
 ## Execution pattern
 
+0. **Verify you're in the correct project thread.** If not, redirect. The research pipeline only works when it runs in the project's own thread.
 1. **Dispatch OpenScience FIRST** — always. Before any EDGE web search. It's async (2-5 min).
 2. **EDGE research in parallel** — web_search + web_fetch while OpenScience runs.
 3. **For large EDGE research (>3 web searches):** spawn a sub-agent. Clean context, no LCM compaction.
@@ -51,6 +52,18 @@ research_method: dual | edge-only
 ```
 
 This gives a filterable audit trail of which notes had two oracles and which didn't.
+
+## Thread routing
+
+**All per-project research MUST be dispatched from the project's own Telegram thread.** The EDGE cross-project thread (topic 4485) is for coordination, triage, and PR gate approvals — NOT for per-project research.
+
+| Project | Thread | Purpose |
+|---|---|---|
+| RAG | topic 4348 | RAG research, staging, promotion, dispatch |
+| Nairrator | topic 6214 | Nairrator research, staging, promotion, dispatch |
+| EDGE | topic 4485 | Cross-project coordination, PR gate, protocol, triage |
+
+**Rule:** If you are in the EDGE thread and someone asks for project-specific research, redirect them to the project thread. If you already did the research from the wrong thread, cross-post the findings immediately.
 
 ## Storage
 
