@@ -13,9 +13,9 @@ code-monkeys is the **implementation team for {{AGENT_NAME}}**. {{AGENT_NAME}} (
 
 ## Repo
 
-- **cwd when invoked on this project = the repo root** (`{{REPO_DIR}}`). Use **repo-relative paths** for everything inside the repo (`{{DOCS_DIR}}/...`, `src/...`).
-- Remote: `{{REPO_SLUG}}` (`gh` is authed). **`{{MAIN_BRANCH}}` is branch-protected: GitHub mechanically rejects direct pushes — a PR with green required checks and an up-to-date branch is the only way in. Always `{{BRANCH_PREFIX}}/*` feature branch + PR; a human merges.** CI is the test step: do NOT run tests/linters locally unless the task says otherwise — push the branch, open the PR, CI runs the suite, and the dispatch wrapper posts the CI verdict to the project thread. Put the PR URL in the `PR:` field of your `=== LOOP STATUS ===` trailer.
-- Project memory lives in `{{DOCS_DIR}}/`. Read `PROJECT_STATE.md` and `TASKS.md` first, then only what the task needs (`QUALITY_GATES.md`, relevant ADRs).
+- **cwd when invoked on this project = the repo root** (the dispatch wrapper `cd`s here per the project config — your `pwd` is authoritative). Use **repo-relative paths** for everything inside the repo (`docs/...`, `src/...`).
+- Remote: the project GitHub repo (`gh` is authed). **`{{MAIN_BRANCH}}` is branch-protected: GitHub mechanically rejects direct pushes — a PR with green required checks and an up-to-date branch is the only way in. Always `{{BRANCH_PREFIX}}/*` feature branch + PR; a human merges.** CI is the test step: do NOT run tests/linters locally unless the task says otherwise — push the branch, open the PR, CI runs the suite, and the dispatch wrapper posts the CI verdict to the project thread. Put the PR URL in the `PR:` field of your `=== LOOP STATUS ===` trailer.
+- Project memory lives in `<DOCS>/` — the project's execution-docs directory (the dispatch wrapper provides its concrete path). Read `PROJECT_STATE.md` and `TASKS.md` first, then only what the task needs (`QUALITY_GATES.md`, relevant ADRs).
 
 ### Invocation contract
 
@@ -25,9 +25,9 @@ code-monkeys is the **implementation team for {{AGENT_NAME}}**. {{AGENT_NAME}} (
 bash {{HOME}}/.openclaw/shared-scripts/edge-coder-run.sh '<promoted implementation task>'
 ```
 
-The wrapper owns the **ordered model fallback** ({{AGENT_NAME}} assigns the tiers, not opencode): it tries the tiers in the order defined by `RDD_MODELS`/`RDD_TIMEOUTS_*` in the project config (auto-detected from ~/.config/edge-rdd/*.env) — that config is the single source of truth for order and per-tier timeouts (do not restate the order in prose, it drifts) — advancing to the next tier only on a genuine provider/model failure. It `cd`s to the repo root itself and keeps permissions **ON**. It prints `opencode model selected: <id>` as its first stdout line — **{{AGENT_NAME}} must always report that model id to the operator** so a fallback is never silent. The `code-monkeys/reviewer` subagent inherits the same model.
+The wrapper owns the **ordered model fallback** ({{AGENT_NAME}} assigns the tiers, not opencode): it tries the tiers in the order defined by `RDD_MODELS`/`RDD_TIMEOUTS_*` in `~/.config/edge-rdd/config.env` — that config is the single source of truth for order and per-tier timeouts (do not restate the order in prose, it drifts) — advancing to the next tier only on a genuine provider/model failure. It `cd`s to the repo root itself and keeps permissions **ON**. Its completion summary reports the effort profile and variant, plus a `fallback path:` line whenever a tier failed over — **{{AGENT_NAME}} must always relay that completion summary (and any fallback line) to the operator** so a fallback is never silent; the exact model id is recorded in the run log's `=== LOOP CLOSER ===` block. The `code-monkeys/reviewer` subagent inherits the coder's model.
 
-Do not use this as permission to bypass prompts: permissions stay **ON** and `--dangerously-skip-permissions` is forbidden. At startup, verify `pwd` is `{{REPO_DIR}}` and the branch is `{{MAIN_BRANCH}}` or a feature branch based from it. If cwd is wrong, you are not in a git repo, or you are on `{{MAIN_BRANCH}}` while a write is requested, stop before editing and report the safe relaunch command above.
+Do not use this as permission to bypass prompts: permissions stay **ON** and `--dangerously-skip-permissions` is forbidden. At startup, verify `pwd` is the repo root (the dispatch wrapper `cd`s here) and the branch is `{{MAIN_BRANCH}}` or a feature branch based from it. If cwd is wrong, you are not in a git repo, or you are on `{{MAIN_BRANCH}}` while a write is requested, stop before editing and report the safe relaunch command above.
 
 ## The {{AGENT_NAME}} boundary
 
@@ -50,17 +50,17 @@ Substrate: **durable = files in the repo** (git-tracked; both runtimes read them
 ### Inbound ({{AGENT_NAME}} → you)
 
 - **Dispatch (push):** the wrapper above (ordered model fallback + per-tier timeouts + a per-repo concurrency lock). Permissions stay **ON**.
-- **Work is actionable only once promoted.** Act only on items in `{{DOCS_DIR}}/RESEARCH_TRANSFER.md` ("Active transfers"), `TASKS.md`, or an ADR. Raw research chat or notes are **not** coding instructions (promotion rule).
+- **Work is actionable only once promoted.** Act only on items in `<DOCS>/RESEARCH_TRANSFER.md` ("Active transfers"), `TASKS.md`, or an ADR. Raw research chat or notes are **not** coding instructions (promotion rule).
 - If a promoted item conflicts with active docs → **stop and request reconciliation**, do not code.
 
 ### Outbound (you → {{AGENT_NAME}}) — two message types, one lifecycle
 
-Log both in `{{DOCS_DIR}}/EDGE_COLLABORATION.md` (sections "Open EDGE requests" / "Implementation feedback log") using the templates defined there. Wrap each in this envelope:
+Log both in `<DOCS>/EDGE_COLLABORATION.md` (sections "Open EDGE requests" / "Implementation feedback log") using the templates defined there. Wrap each in this envelope:
 
 ```
 ### <research-request | reality-feedback> — <short title>
 ID: CM-YYYYMMDD-NN          # CM- = originated by code-monkeys
-Re: <EDGE/CM id this answers, or —>
+Re: <{{AGENT_NAME}}/CM id this answers, or —>
 Status: open | acked | answered | promoted | implementing | implemented | closed
 Priority: blocking | high | normal | background
 Date: YYYY-MM-DD
@@ -101,7 +101,7 @@ Never read or edit `.env*`, `**/secrets/**`, `**/.ssh/**`, `**/credentials/**`. 
 
 ## Invariants
 
-Honor the project invariants defined in `{{DOCS_DIR}}/QUALITY_GATES.md`. If a task would violate one, stop and emit a research-request instead of coding around it.
+Honor the project invariants defined in `<DOCS>/QUALITY_GATES.md`. If a task would violate one, stop and emit a research-request instead of coding around it.
 
 ## Completion gate
 
