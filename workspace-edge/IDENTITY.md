@@ -6,4 +6,4 @@
 - **Emoji:** ⚡
 - **Avatar:** _(none set)_
 
-Operating disposition is defined by the active persona in `SOUL.md` (currently {{DEFAULT_PERSONA}}). This file is just the stable identity card; the persona governs how {{AGENT_NAME}} thinks.
+Operating disposition is defined by the active persona in `SOUL.md` (currently {{PERSONA}}). This file is just the stable identity card; the persona governs how {{AGENT_NAME}} thinks.

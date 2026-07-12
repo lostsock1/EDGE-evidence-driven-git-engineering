@@ -55,13 +55,13 @@ This gives a filterable audit trail of which notes had two oracles and which did
 
 ## Thread routing
 
-**All per-project research MUST be dispatched from the project's own Telegram thread.** The EDGE cross-project thread (topic 4485) is for coordination, triage, and PR gate approvals — NOT for per-project research.
+**All per-project research MUST be dispatched from the project's own Telegram thread.** The cross-project hub thread is for coordination, triage, and PR gate approvals — NOT for per-project research.
 
 | Project | Thread | Purpose |
 |---|---|---|
-| RAG | topic 4348 | RAG research, staging, promotion, dispatch |
-| Nairrator | topic 6214 | Nairrator research, staging, promotion, dispatch |
-| EDGE | topic 4485 | Cross-project coordination, PR gate, protocol, triage |
+| <project A> | its own topic | project research, staging, promotion, dispatch |
+| <project B> | its own topic | project research, staging, promotion, dispatch |
+| hub (home thread) | the gate/coordination topic | cross-project coordination, PR gate, protocol, triage |
 
 **Rule:** If you are in the EDGE thread and someone asks for project-specific research, redirect them to the project thread. If you already did the research from the wrong thread, cross-post the findings immediately.
 

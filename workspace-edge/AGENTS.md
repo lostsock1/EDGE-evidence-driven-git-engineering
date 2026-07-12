@@ -7,7 +7,7 @@
 - **Activation mechanism:** copy the chosen persona over `SOUL.md` (`cp personas/<X>.md SOUL.md`). `SOUL.md` is the file OpenClaw actually bootstraps into context; `PERSONA.md` at workspace root is only a marker copy of the active persona and is NOT loaded at runtime (the `bootstrap-extra-files` hook has no paths configured).
 - When swapping personas, update both files: `SOUL.md` (the live one) and `PERSONA.md` (the marker), so they stay identical.
 - A persona can also be reinforced per-topic via `systemPrompt` overlay in `openclaw.json`.
-- Current active persona: {{DEFAULT_PERSONA}} (see `PERSONA.md` marker).
+- Current active persona: {{PERSONA}} (see `PERSONA.md` marker).
 
 ## Operating model
 - {{AGENT_NAME}} owns cross-project research standards, source discipline, and reusable methods.
@@ -29,8 +29,8 @@
 - Do **not** keep per-project `repo-seed/` staging copies in the workspace.
 
 ## Install & portability
-- This workspace is a **rendered {{AGENT_NAME}} install** plus a local Obsidian layer. `install.sh` (from `lostsock1/EDGE-evidence-driven-git-engineering`) renders `template.env` → `{{TOKENS}}` and applies; it is fully portable (no hardcoded paths in the templates).
-- **install.sh owns** (re-render/re-apply on a new system): `~/.config/edge-rdd/config.env`, `shared-scripts/edge-coder-run.sh`, opencode `code-monkeys/` agents, `USER.md`, `personas/`, `projects/<slug>/{PROJECT,RESUME}.md` + seeded `notes/`, and each repo's `docs/agent/`.
+- This workspace is a **rendered {{AGENT_NAME}} install** plus a local Obsidian layer. `install.sh` (from `lostsock1/EDGE-evidence-driven-git-engineering`) renders the `template.env` values into the double-brace tokens and applies; it is fully portable (no hardcoded paths in the templates).
+- **install.sh owns** (re-render/re-apply on a new system): `~/.config/edge-rdd/{config,gate,research}.env`, `shared-scripts/edge-coder-run.sh` + `edge-pr-gate.sh` + `openscience-research.{sh,py}` + `openscience-smoke.sh`, the `gate`/`research` skills, opencode `code-monkeys/` agents, `USER.md`, `personas/`, `projects/<slug>/{PROJECT,RESUME}.md` + seeded `notes/`, and each repo's `docs/agent/`.
 - **Local layer (NOT from install.sh — version-control separately)**: the numbered Obsidian vault (`00_INBOX`–`99_ARCHIVE`), `.obsidian/`, this `AGENTS.md`, `EDGE Vault.md`, `SKILL-REGISTRY.md`, other root docs, multi-project configs, and per-project `notes/` beyond the seeded files.
 - **Runtime state (never port)**: `.openclaw/`, `storage/`, `snapshots/`, logs, `.qdrant-initialized`.
 - **Rebuild on a new system:** clone {{AGENT_NAME}} → `cp template.env.example template.env` → fill in → `./install.sh` (review `rendered/`) → `./install.sh --apply` → merge `rendered/openclaw/*.json5` into `openclaw.json` → `scripts/kickoff.sh`. Re-render `config.env`; do not copy it.
