@@ -20,7 +20,7 @@ cp template.env.example template.env
 $EDITOR template.env        # fill in EVERY value — see comments in the file
 ```
 
-The important ones: `RDD_HOME`, `RDD_REPO_SLUG`/`RDD_REPO_DIR`, `RDD_MAIN_BRANCH`, `RDD_TG_TARGET`/`RDD_TG_THREAD`, `RDD_OPERATOR_TG_USER_ID`, `RDD_MODELS`.
+The important ones: `RDD_HOME`, `RDD_REPO_SLUG`/`RDD_REPO_DIR`, `RDD_MAIN_BRANCH`, `RDD_TG_TARGET`/`RDD_TG_THREAD`, `RDD_OPERATOR_TG_USER_ID`, and the model knobs (`RDD_MODELS`, `RDD_CODER_MODEL`, `RDD_EDGE_MODEL_PRIMARY`) — the template ships **no** model choices; every `provider/model` placeholder must become one of yours.
 
 ## 2. Render and inspect
 
@@ -40,8 +40,10 @@ This installs (with timestamped backups under `~/.config/edge-rdd/backups/`):
 
 | What | Where |
 |---|---|
-| runtime config | `~/.config/edge-rdd/config.env` |
-| dispatch wrapper | `~/.openclaw/shared-scripts/edge-coder-run.sh` |
+| runtime config (primary project + model ladder) | `~/.config/edge-rdd/config.env` |
+| PR-gate hub + research dispatch configs | `~/.config/edge-rdd/gate.env`, `~/.config/edge-rdd/research.env` |
+| dispatch wrapper + PR gate + research scripts | `~/.openclaw/shared-scripts/` (symlinks into the workspace) |
+| `/gate` + `/research` skills | `~/.openclaw/skills/{gate,research}` (symlinks) |
 | opencode agents | `~/.config/opencode/agents/code-monkeys/` |
 | communication contract | `~/.openclaw/workspace-<agent>/USER.md` |
 | persona library + SOUL.md | `~/.openclaw/workspace-<agent>/personas/` (default `RDD_PERSONA=FRONTIER` seeded to `SOUL.md`; existing SOUL.md never overwritten) |
@@ -63,7 +65,7 @@ This installs (with timestamped backups under `~/.config/edge-rdd/backups/`):
    heartbeats, give each of them an explicit `heartbeat: { every: "30m" }`
    (that preserves the default exactly). The heartbeat block itself has no
    active tasks (the PR gate runs on-demand via `/gate sweep`).
-3. Merge `rendered/openclaw/topic.project-thread.json5` into your Telegram group's `topics` map.
+3. Merge `rendered/openclaw/topic.project-thread.json5` into your Telegram group's `topics` map, and `rendered/openclaw/topic.hub-thread.json5` for the coordination/gate-hub thread.
 4. **Enable inline-button callbacks (required for the gate's tap-to-approve).**
    Telegram's `capabilities.inlineButtons` defaults to `allowlist`, which
    silently drops the gate's approval-button taps — the button renders but a tap
@@ -123,7 +125,7 @@ EDGE_CODER_DRYRUN_MSG=1 bash ~/.openclaw/shared-scripts/edge-coder-run.sh --fg \
   'ro Read docs/agent/PROJECT_STATE.md and summarize the current project state. Do not write anything.'
 ```
 
-Expected: `opencode model selected: <tier-1>`, a summary, and a `=== LOOP CLOSER ===` block with `trailer: yes`.
+Expected: a probe line in the ledger, a summary, and a `=== LOOP CLOSER ===` block with `trailer: yes` plus the effort profile, variant, and model.
 
 Then from Telegram, in the project topic, ask the research agent to run the same `status` command — this proves the agent → wrapper elevated-exec path.
 
@@ -137,6 +139,18 @@ Expected: one block per configured project listing PRs/branches, the actions it
 *would* offer as buttons, and `ALL_CLEAN` at the end if the repos are trunk-only.
 The real sweep runs on-demand via `/gate sweep` in chat; approvals are
 described in [OPERATIONS.md](OPERATIONS.md#the-pr-gate-approve-merges-from-your-phone).
+
+## 6b. Optional: the OpenScience research companion
+
+The dual-research protocol needs the sandboxed research workbench. Follow
+[openscience/README.md](../openscience/README.md) (binary + workspace, your
+model choices in `openscience.json`, keys in `openscience.env`, the hardened
+systemd unit), then verify:
+
+```bash
+bash ~/.openclaw/shared-scripts/openscience-smoke.sh --health-only   # no model use
+bash ~/.openclaw/shared-scripts/openscience-smoke.sh                 # one real dispatch
+```
 
 ## 7. Kick off the thread
 

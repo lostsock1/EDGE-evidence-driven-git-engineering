@@ -70,8 +70,10 @@ See `lab/README.md` for full documentation.
 ## Reading the completion message
 
 ```
-✅ coder dispatch run-20260703-064023-14383 done on `openai/gpt-5.5`
-fallback path: gpt-5.5: rate-limited → deepseek-v4-pro      <- only when tiers failed
+✅ coder dispatch run-20260703-064023-14383 done (opencode-configured model)
+effort profile: standard
+variant: default
+fallback path: model-a: rate-limited → model-b      <- only when tiers failed
 branch: cm/qdq-retrieval-parity
 PR: https://github.com/you/repo/pull/12
 trailer: yes
@@ -80,7 +82,8 @@ a1b2c3d Add retrieval parity eval script
 full output: ~/.local/state/edge-rdd/runs/run-...log
 ```
 
-- **model line** — which tier actually did the work; a fallback is never silent.
+- **effort/variant lines** — which effort profile the dispatch ran at and which opencode variant tier 1 used; the exact model id is in the run log's `=== LOOP CLOSER ===` block.
+- **fallback path** — present only when tiers failed over; a fallback is never silent.
 - **PR: none + no commits** — the run was likely beheaded (see troubleshooting) or the coder stopped at a research boundary; check the run log and `EDGE_COLLABORATION.md`.
 - **trailer: MISSING** — the model skipped the mandatory status trailer; the wrapper's own git/PR facts above are still reliable, but treat the model's prose claims with suspicion.
 - **⚠️ OPEN EDGE request(s)** — the coder handed research back; that's the loop working, not a failure. EDGE answers, promotes, re-dispatches.
@@ -91,11 +94,12 @@ Then, minutes later: `✅ PR #12 CI: all checks green — ready for human merge.
 
 | Label | Meaning | Usual action |
 |---|---|---|
+| `probe-fail` | tier failed its liveness probe (dead key, 429, hung provider) | none — next tier already took over |
 | `rate-limited` | provider 429 | none — next tier already took over |
 | `quota/billing` | credits exhausted / 402 | top up that provider |
 | `auth` | key invalid/revoked | rotate the key in opencode config |
 | `provider-overloaded` | 503/529 capacity | none — retry later or rely on tiers |
-| `hard-timeout` | tier hit its RDD_TIMEOUTS_* ceiling | task too big? split the work order |
+| `hard-timeout` | the real task hit the fixed 3600s work budget (probes use RDD_TIMEOUTS_*) | task too big? split the work order |
 | `provider-error` | opencode error event | read the run log |
 | `empty-or-error-output` | model returned nothing usable | read the run log; often a model-side stall |
 
@@ -128,7 +132,7 @@ Then, minutes later: `✅ PR #12 CI: all checks green — ready for human merge.
 
 ## Multiple projects on one server
 
-The wrapper's config file describes the **default** project. A second project reuses the same wrapper and coder agents with per-dispatch overrides — no second install needed:
+The wrapper's default config file (`~/.config/edge-rdd/config.env`) describes the **primary** project and the shared model tier ladder. A second project reuses the same wrapper and coder agents with per-dispatch overrides — no second install needed:
 
 ```bash
 EDGE_CODER_THREAD=<other-topic-id> \
@@ -143,6 +147,51 @@ Caveat: plain `RDD_*` environment variables do **not** override the config — s
 EDGE_RDD_CONFIG=~/.config/edge-rdd/<project>.env \
 bash ~/.openclaw/shared-scripts/edge-coder-run.sh --dir <other-repo-root> '<task>'
 ```
+
+## Effort profiles (how hard the coder thinks)
+
+Every dispatch runs at an effort profile: `fast`, `standard`, `deep`, or `max`.
+With `RDD_VARIANT_POLICY=auto` the wrapper classifies the task itself
+(security/incident keywords → `max`, debugging/architecture → `deep`, trivial
+doc fixes → `fast`, everything else → `standard`) and applies your
+`RDD_VARIANTS_<PROFILE>` per-tier variant map. Override per dispatch with a
+task prefix — `[effort=deep] fix the flaky retry test` — or the
+`EDGE_CODER_EFFORT` env var. The chosen profile is recorded in the ledger, the
+lock holder, the loop closer, and the completion message. Variant maps are
+**yours to define** (they must match variants in your opencode config); with
+none defined, `auto` still classifies and records the profile but tiers run
+with the baseline `RDD_VARIANTS` (or none).
+
+## Research dispatch (/research — the OpenScience companion)
+
+With the optional [OpenScience companion](../openscience/README.md) installed,
+every project thread can dispatch sandboxed external research:
+
+| You type | What happens |
+|---|---|
+| `/research assign "<question>"` | async dispatch; returns `DISPATCHED <ERA-id>`, the finished packet posts back with **Accept / Reject** buttons |
+| `/research list` / `/research status` | assignments, packets awaiting approval, workbench health |
+| `/research show OSR-<id>` | print a packet |
+| `/research accept <handle>` | promote the packet into the knowledge base (`~/edge-research-kb/<project>/`) — single-use |
+| `/research reject <handle>` | archive without adding to the KB |
+| `/research followup <id> "<q>"` | follow-up question referencing a prior packet |
+
+Accepting stores knowledge; it never implements anything. Promotion into a
+work order stays the normal staging-ladder step. The dual-research protocol
+(every question through BOTH the research agent and OpenScience) is defined in
+[research-protocol.md](research-protocol.md).
+
+## Daily dev report (optional cron)
+
+A gateway cron job can post a cross-project daily report to the hub thread.
+Create it with the OpenClaw cron API/CLI on the research agent with an
+agent-turn payload along these lines:
+
+> Generate the daily development report. Include: (1) what was done in the
+> last 24 hours across all projects, (2) current status of each project with
+> open PRs and CI state, (3) concrete options for each project, (4) any
+> problems or blockers. Run a gate sweep first to get current GitHub state.
+> Send it to the hub thread.
 
 ## The PR gate: approve merges from your phone
 
@@ -169,7 +218,7 @@ The gate is also a slash command (the `gate` skill), so you can drive it directl
 
 | You type | What happens |
 |---|---|
-| `/gate` or `/gate sweep` (or `gate sweep`) | run the sweep now (heartbeat does it every 6h anyway) |
+| `/gate` or `/gate sweep` (or `gate sweep`) | run the sweep now (the dispatch wrapper also auto-sweeps when a PR's CI goes green) |
 | `/gate pending` (or `gate pending`) | list open asks with their `eg:<id>` handles |
 | `/gate status` | pending + the last few executed/failed actions |
 | `/gate act <id>` | execute an already-approved action (same as tapping its button) |

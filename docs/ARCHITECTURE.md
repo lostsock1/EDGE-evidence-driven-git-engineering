@@ -24,6 +24,7 @@ A **research agent** (EDGE, running in OpenClaw, driven from a Telegram thread) 
         │  returns: DISPATCHED <run-id>
         ▼
  wrapper (detached worker, per-repo flock)
+        │  effort classified (auto) → tier 1 probe ── fail? next tier …
         │  tier 1 model ── fail? classify reason, hand off partial work ──▶ tier 2 …
         ▼
  opencode code-monkeys/coder  (permissions ON)
@@ -33,8 +34,8 @@ A **research agent** (EDGE, running in OpenClaw, driven from a Telegram thread) 
         ▼
  wrapper loop closer
         │  verify trailer · resolve PR · collect commits · detect open requests
-        ├──▶ Telegram: ✅ completion summary (model, branch, PR, trailer, commits)
-        └──▶ CI watcher (detached): polls gh pr checks
+        ├──▶ Telegram: ✅ completion summary (effort, variant, branch, PR, trailer, commits)
+        └──▶ CI watcher (detached): polls gh pr checks; green also auto-triggers a gate sweep
                  └──▶ Telegram: ✅ "all green — ready for human merge" / ❌ failed checks
         ▼
  operator merges on GitHub (the only unprotected write path)
@@ -46,9 +47,9 @@ A **research agent** (EDGE, running in OpenClaw, driven from a Telegram thread) 
 
 **Async dispatch, not blocking.** The research agent's `exec` has a timeout budget; a long coding run would behead it. The wrapper detaches a worker (which inherits the flock fd, so there is no unlocked gap) and pushes results back into the thread when they exist. The agent's instructions say: relay `DISPATCHED <id>`, end the turn, never poll.
 
-**The wrapper owns model fallback, because opencode doesn't.** opencode has no native retry-on-429 and no provider fallback. The tier ladder (`RDD_MODELS`) is the fallback layer, with per-tier hard timeouts, failure **classification** (rate-limited / quota / auth / overloaded / timeout) so a fallback is never silent, and **partial-work handoff** — a failed tier's commits and dirty tree are described to the next tier with "continue, don't restart".
+**The wrapper owns model fallback, because opencode doesn't.** opencode has no native retry-on-429 and no provider fallback. The tier ladder (`RDD_MODELS` in `~/.config/edge-rdd/config.env` — the single source of truth) is the fallback layer. Each tier first answers a tiny **liveness probe** inside its per-tier `RDD_TIMEOUTS_*` budget — a dead key, hung provider, or 429 fails over in seconds instead of consuming an hour-long task timeout — then gets a fixed work budget for the real task. Failures are **classified** (probe-fail / rate-limited / quota / auth / overloaded / timeout) so a fallback is never silent, and **partial-work handoff** describes a failed tier's commits and dirty tree to the next tier with "continue, don't restart". An optional **effort policy** (`RDD_VARIANT_POLICY=auto`) classifies each task (fast/standard/deep/max) and applies per-tier opencode variant maps you define — task prefix `[effort=…]` overrides it. The full JSON stream of every run is tee'd to `runs/stream.log` (rotated at 10MB).
 
-**`ask` permissions are a trap in non-interactive dispatch.** There is no human at the opencode prompt, so `ask` auto-rejects and beheads the run mid-task (we lost a real run to an ADR edit gated `ask`). The template therefore uses only `allow` and `deny` for routine dev surfaces, and keeps `ask` solely for things that should genuinely never happen unattended (network fetches to arbitrary hosts, `docker compose up`, outbound messages). The safety this seems to give up is re-provided mechanically one layer down:
+**`ask` permissions are a trap in non-interactive dispatch.** There is no human at the opencode prompt, so `ask` auto-rejects and beheads the run mid-task (we lost a real run to an ADR edit gated `ask`). The template therefore uses **only `allow` and `deny`**: the coder gets broad bash `allow` with hard denies on history rewrite, force-push, merges, releases, and privilege escalation; the reviewer gets broad read `allow` with an explicit deny-list on every write/network verb. The safety this seems to give up is re-provided mechanically one layer down:
 
 **The human gate is branch protection, not agent obedience.** Agents *cannot* push to the trunk — GitHub rejects it regardless of what any prompt says. PRs require green required checks and an up-to-date branch; `enforce_admins` is on; force pushes and deletions are off; approvals are set to 0 because the operator pressing "merge" *is* the approval. `gh pr merge` / `git push --force` / `git reset` stay hard-`deny` in the agent permission maps as a second layer.
 
@@ -74,7 +75,7 @@ EDGE tests ideas through three separate oracles, ordered by the strength of evid
 
 1. **Gapped lab** (`lab/lab-run.sh`) — EDGE designs the test. Ephemeral Docker container, pre-registered protocol, air-gapped, auto-destroyed. Weakest evidence (EDGE can shape the test) but cheapest and fastest.
 2. **Implementation oracle** (`edge-coder-run.sh`) — Reality designs the test. A coder agent implements the work order on a feature branch; the seam that wasn't there, the test that failed, the interface that didn't fit — these are refutations EDGE couldn't shape. Highest-grade evidence.
-3. **OpenScience** (`openscience-research.sh`) — External research sandbox. Read-only, no code execution. Feeds the research pool with mechanisms from papers and repos.
+3. **OpenScience** (`openscience-research.sh` + the `/research` skill) — External research sandbox: a local, systemd-hardened, research-only workbench (see `openscience/README.md`). Async packets return to the originating thread with Accept/Reject buttons; accepted packets land in `~/edge-research-kb/<project>/`. Feeds the research pool with mechanisms from papers and repos, and pairs with the agent's own web research under the dual-research protocol (`docs/research-protocol.md`).
 
 A finding promotes: lab survival → implementation survival → merged and proven.
 

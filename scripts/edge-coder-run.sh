@@ -19,13 +19,15 @@
 #   status:           show lock holder + recent runs.
 #
 # CONFIGURATION — everything lives in a config file sourced at startup:
-#   $EDGE_RDD_CONFIG  >  auto-detect first .env with RDD_REPO_DIR in ~/.config/edge-rdd/  >  built-in defaults
+#   $EDGE_RDD_CONFIG  >  ~/.config/edge-rdd/config.env  >  built-in defaults
 # See template.env.example in the template repo for every knob.
 #
 # MODEL FALLBACK: opencode has NO native retry-on-429 and NO provider fallback —
 # this wrapper's ordered tier ladder IS the fallback layer. RDD_MODELS /
 # RDD_TIMEOUTS_* are the single source of truth for the order; do not restate
-# the order in prose docs (it drifts).
+# the order in prose docs (it drifts). RDD_VARIANT_POLICY=auto can choose
+# per-tier OpenCode variants from task difficulty; explicit override via
+# EDGE_CODER_EFFORT=<fast|standard|deep|max> or a task prefix [effort=deep].
 #
 # Failure = nonzero exit OR {"type":"error"} stream event OR no text produced.
 # A permission block or a normal completion is NOT a failure.
@@ -40,7 +42,8 @@
 #     the whole home dir and hang forever — refuse to dispatch if present.
 #   - Concurrency lock (flock, one per repo tree) with holder info: a second
 #     concurrent dispatch is refused (exit 3) and told who holds the lock.
-#   - Per-tier hard timeout, index-aligned with RDD_MODELS.
+#   - Per-tier liveness probe with its own timeout (index-aligned with
+#     RDD_MODELS), then a fixed work budget for the real task.
 #   - Partial-work handoff: if a failed tier left commits or a dirty tree, the
 #     next tier is told to inspect and CONTINUE, not restart.
 #   - Failure classification: each failed tier is labeled (rate-limited,
@@ -56,17 +59,11 @@
 #         $RDD_RUNS_DIR/<id>.log  (full per-run output)
 
 set -uo pipefail
-# Source OpenClaw .env for API keys (alibaba-token-plan, etc.)
+# Source OpenClaw .env so provider API keys reach opencode.
 [ -f "$HOME/.openclaw/.env" ] && source "$HOME/.openclaw/.env"
 
 # ---- configuration --------------------------------------------------------
-# Auto-detect config: scan for .env files with RDD_REPO_DIR if not explicit.
-if [ -z "${EDGE_RDD_CONFIG:-}" ]; then
-  for _f in "$HOME/.config/edge-rdd/"*.env; do
-    [ -f "$_f" ] && grep -q RDD_REPO_DIR "$_f" 2>/dev/null && { EDGE_RDD_CONFIG="$_f"; break; }
-  done
-fi
-CONFIG="${EDGE_RDD_CONFIG:-}"
+CONFIG="${EDGE_RDD_CONFIG:-$HOME/.config/edge-rdd/config.env}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG" ] && . "$CONFIG"
 
@@ -77,9 +74,16 @@ AGENT=${RDD_AGENT:-code-monkeys/coder}
 MAIN_BRANCH=${RDD_MAIN_BRANCH:-main}
 BRANCH_PREFIX=${RDD_BRANCH_PREFIX:-cm}
 DOCS_DIR=${RDD_DOCS_DIR:-docs/agent}
-read -r -a MODELS      <<< "${RDD_MODELS:-deepseek/deepseek-v4-pro}"
-read -r -a TIMEOUTS_BG <<< "${RDD_TIMEOUTS_BG:-3600 2400}"
-read -r -a TIMEOUTS_FG <<< "${RDD_TIMEOUTS_FG:-1800 1500}"
+# RDD_MODELS is the ordered tier ladder — no built-in default on purpose:
+# the model choice belongs to the operator's config, not this script.
+read -r -a MODELS      <<< "${RDD_MODELS:-}"
+read -r -a VARIANTS    <<< "${RDD_VARIANTS:-}"
+# RDD_TIMEOUTS_* bound the per-tier LIVENESS PROBE, index-aligned with
+# RDD_MODELS. The real task gets WORK_TO (below) once a tier answers its probe.
+read -r -a TIMEOUTS_BG <<< "${RDD_TIMEOUTS_BG:-60 60}"
+read -r -a TIMEOUTS_FG <<< "${RDD_TIMEOUTS_FG:-60 60}"
+VARIANT_POLICY=${RDD_VARIANT_POLICY:-static}
+EFFORT_PROFILE=${EDGE_CODER_EFFORT_PROFILE:-}
 LOG=${RDD_LOG:-$HOME/.local/state/edge-rdd/edge-coder-run.log}
 RUNS_DIR=${RDD_RUNS_DIR:-$HOME/.local/state/edge-rdd/runs}
 LOCKDIR=${RDD_LOCKDIR:-$HOME/.local/state/edge-rdd/locks}
@@ -88,11 +92,14 @@ NUDGE_TARGET=${EDGE_CODER_TARGET:-${RDD_TG_TARGET:-}}
 NUDGE_THREAD=${EDGE_CODER_THREAD:-${RDD_TG_THREAD:-}}
 CI_POLL_SECS=${RDD_CI_POLL_SECS:-60}
 CI_POLL_MAX=${RDD_CI_POLL_MAX:-40}
+GATE_SCRIPT=${RDD_GATE_SCRIPT:-$HOME/.openclaw/shared-scripts/edge-pr-gate.sh}
 # gh/setsid/flock often live outside a systemd-spawned PATH — prepend what you need.
 [ -n "${RDD_PATH_PREPEND:-}" ] && export PATH="$RDD_PATH_PREPEND:$PATH"
 
 ts() { date +%Y-%m-%dT%H:%M:%S%z; }
 mkdir -p "$(dirname "$LOG")" "$RUNS_DIR" "$LOCKDIR"
+# Cleanup rotated stream logs older than 7 days
+find "$RUNS_DIR" -name "stream.log.old" -mtime +7 -delete 2>/dev/null || true
 
 # ---- dependency preflight ---------------------------------------------------
 for c in flock setsid timeout git python3; do
@@ -116,7 +123,7 @@ send_tg() { # send_tg "<message>"  (best-effort; EDGE_CODER_DRYRUN_MSG=1 prints 
   fi
   local -a thread_args=()
   [ -n "$NUDGE_THREAD" ] && thread_args=(--thread-id "$NUDGE_THREAD")
-  timeout 30 "$OCLI" message send --channel "$NUDGE_CHANNEL" --target "$NUDGE_TARGET" \
+  timeout 60 "$OCLI" message send --channel "$NUDGE_CHANNEL" --target "$NUDGE_TARGET" \
     "${thread_args[@]}" --message "$msg" >>"$LOG" 2>&1
 }
 
@@ -158,7 +165,83 @@ if [ -z "$TASK" ]; then
   exit 2
 fi
 
+# ---- effort / variant policy --------------------------------------------------
+strip_effort_prefix() {
+  local raw="$1"
+  if [[ "$raw" =~ ^[[:space:]]*\[effort=(fast|standard|deep|max|auto|static)\][[:space:]]*(.*)$ ]]; then
+    TASK_EFFORT_PREFIX="${BASH_REMATCH[1]}"
+    TASK="${BASH_REMATCH[2]}"
+  else
+    TASK_EFFORT_PREFIX=""
+    TASK="$raw"
+  fi
+}
+
+classify_effort() { # classify_effort "<task>" -> fast|standard|deep|max
+  local t="${1,,}" len
+  len=${#1}
+  if [[ "$t" =~ security|secret|credential|auth|permission|sandbox|incident|breach|exploit|data[[:space:]-]*loss|corrupt|corruption|production|prod[[:space:]-]*down|outage|payment|billing|irreversible|delete|wipe|rotate[[:space:]-]*key|emergency|rollback ]]; then
+    echo max; return
+  fi
+  if [[ "$t" =~ root[[:space:]-]*cause|regression|refactor|migration|schema|database|performance|race|deadlock|concurrency|distributed|architecture|design|multi[[:space:]-]*file|ci[[:space:]-]*(red|fail)|test[[:space:]-]*fail|flaky|investigate|debug|diagnose|unknown|cross[[:space:]-]*system ]]; then
+    echo deep; return
+  fi
+  if [ "$len" -le 300 ] && [[ "$t" =~ typo|spelling|copy|readme|docs?|comment|format|rename|one[[:space:]-]*line|small|trivial|lint|style ]]; then
+    echo fast; return
+  fi
+  echo standard
+}
+
+variants_for_effort() { # variants_for_effort <fast|standard|deep|max>
+  # Per-profile variant maps come from the dispatch config (RDD_VARIANTS_*),
+  # index-aligned with RDD_MODELS. Every value must exist as a model variant
+  # in your opencode config. An empty/unset map is valid: the profile is still
+  # classified and recorded, but tiers keep the baseline RDD_VARIANTS (or none).
+  case "$1" in
+    fast)     echo "${RDD_VARIANTS_FAST:-}" ;;
+    standard) echo "${RDD_VARIANTS_STANDARD:-}" ;;
+    deep)     echo "${RDD_VARIANTS_DEEP:-}" ;;
+    max)      echo "${RDD_VARIANTS_MAX:-}" ;;
+    *)        return 1 ;;
+  esac
+}
+
+resolve_effort_variants() {
+  local prefix profile variant_line
+  strip_effort_prefix "$TASK"
+  prefix="${TASK_EFFORT_PREFIX:-}"
+  profile="${EDGE_CODER_EFFORT:-${EFFORT_PROFILE:-}}"
+  [ -z "$profile" ] && [ -n "$prefix" ] && profile="$prefix"
+  if [ -z "$profile" ]; then
+    if [ "$VARIANT_POLICY" = auto ]; then
+      profile="$(classify_effort "$TASK")"
+    else
+      profile=static
+    fi
+  fi
+  [ "$profile" = auto ] && profile="$(classify_effort "$TASK")"
+
+  if [ "$profile" = static ]; then
+    EFFORT_PROFILE=static
+  elif variant_line="$(variants_for_effort "$profile")"; then
+    EFFORT_PROFILE="$profile"
+    if [ -n "$variant_line" ]; then
+      read -r -a VARIANTS <<< "$variant_line"
+      export RDD_VARIANTS="$variant_line"
+    fi
+  else
+    echo "edge-coder-run: invalid effort profile '$profile' (use fast|standard|deep|max|auto|static)" >&2
+    exit 2
+  fi
+  export EDGE_CODER_EFFORT_PROFILE="$EFFORT_PROFILE"
+}
+resolve_effort_variants
+
 # ---- guards -------------------------------------------------------------------
+if [ ${#MODELS[@]} -eq 0 ]; then
+  echo "edge-coder-run: RDD_MODELS is empty — define the ordered tier ladder in $CONFIG (see template.env.example)." >&2
+  exit 2
+fi
 if [ -d "$HOME/.git" ]; then
   echo "edge-coder-run: REFUSING — $HOME/.git exists. opencode would snapshot-walk all of \$HOME and hang forever. Remove it first (rm -rf \$HOME/.git)." >&2
   exit 2
@@ -175,7 +258,7 @@ run_dispatch() {
   local -a TIMEOUTS
   if [ "$MODE" = fg ]; then TIMEOUTS=("${TIMEOUTS_FG[@]}"); else TIMEOUTS=("${TIMEOUTS_BG[@]}"); fi
 
-  echo "[$(ts)] DISPATCH id=${RUN_ID:-fg} mode=$MODE dir=$DIR task=${TASK:0:120}" >> "$LOG"
+  echo "[$(ts)] DISPATCH id=${RUN_ID:-fg} mode=$MODE effort=${EFFORT_PROFILE:-static} dir=$DIR task=${TASK:0:120}" >> "$LOG"
   local HEAD_BEFORE
   HEAD_BEFORE="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo '')"
 
@@ -236,10 +319,15 @@ PROTO
     echo "empty-or-error-output"
   }
 
-  local i=0 M TO RC OUT PARTIAL USED_MODEL="" ERRTMP REASON FAIL_SUMMARY=""
+  local i=0 M TO V RC OUT PARTIAL USED_MODEL="" USED_VARIANT="" ERRTMP REASON FAIL_SUMMARY=""
   for M in "${MODELS[@]}"; do
     TO="${TIMEOUTS[$i]:-1500}"
+    V="${VARIANTS[$i]:-default}"
     i=$((i+1))
+    local -a VARIANT_ARGS=()
+    if [ -n "$V" ] && [ "$V" != "default" ] && [ "$V" != "-" ]; then
+      VARIANT_ARGS=(--variant "$V")
+    fi
 
     # Partial-work handoff: if an earlier tier moved HEAD or left a dirty tree,
     # tell this tier to continue rather than restart.
@@ -254,20 +342,61 @@ FIRST run git log --oneline -5 and git status, read what exists, and CONTINUE
 from it. Do NOT restart from scratch and do NOT revert existing progress.
 
 "
-      echo "[$(ts)] PARTIAL-WORK handoff to tier $M (HEAD moved or dirty tree)" >> "$LOG"
+      echo "[$(ts)] PARTIAL-WORK handoff to tier $M variant=${V:-default} (HEAD moved or dirty tree)" >> "$LOG"
     fi
 
-    echo "[$(ts)] TRY model=$M timeout=${TO}s" >> "$LOG"
-    # --model pins the coder; OPENCODE_CONFIG_CONTENT sets the global model so a
-    # model-less reviewer subagent lands on the same tier (covers opencode #17870).
+    echo "[$(ts)] TRY model=$M variant=${V:-default} timeout=${TO}s" >> "$LOG"
+    # --- Liveness probe first: short prompt, short timeout ---
+    echo "[$(ts)] PROBE model=$M" >> "$LOG"
+    PROBE_OUT="$( { cd "$DIR" && \
+      timeout --signal=TERM --kill-after=10 "$TO" \
+      "$OPENCODE" run --format json --model "$M" "${VARIANT_ARGS[@]}" --agent "$AGENT" "say hello"; } 2>/dev/null | \
+      python3 -c '
+import sys, json
+texts = []
+has_text = False
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if e.get("type") == "text":
+        has_text = True
+        t = e.get("text") or e.get("part", {}).get("text")
+        if t:
+            texts.append(t)
+if not has_text:
+    sys.exit(1)
+print("".join(texts))
+')"
+    PROBE_RC=$?
+    if [ $PROBE_RC -ne 0 ]; then
+      echo "[$(ts)] PROBE-FAIL model=$M rc=$PROBE_RC -> next tier" >> "$LOG"
+      FAIL_SUMMARY="${FAIL_SUMMARY}${M##*/}: probe-fail → "
+      continue
+    fi
+    echo "[$(ts)] PROBE-OK model=$M — dispatching real task" >> "$LOG"
+    # --- Real task: model is alive, give it work time ---
+    WORK_TO=3600
+    # Model override per tier — the wrapper's RDD_MODELS chain IS the fallback.
+    # Reviewer subagent inherits the model from opencode config.
     # OCRC captures opencode/timeout's own exit code — the pipeline otherwise
     # reports the JSON parser's status, which masks timeout's 124 and turns
     # every hard-timeout into "empty-or-error-output" in the ledger.
     ERRTMP="$(mktemp /tmp/edge-coder-stderr.XXXXXX)"
     OCRC="$(mktemp /tmp/edge-coder-rc.XXXXXX)"
-    OUT="$( { cd "$DIR" && OPENCODE_CONFIG_CONTENT="{\"model\":\"$M\"}" \
-      timeout --signal=TERM --kill-after=30 "$TO" \
-      "$OPENCODE" run --format json --model "$M" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}"; echo $? >"$OCRC"; } 2>>"$ERRTMP" | \
+    STREAM_LOG="$RUNS_DIR/stream.log"
+    # Rotate if over 10MB
+    if [ -f "$STREAM_LOG" ] && [ "$(stat -c%s "$STREAM_LOG" 2>/dev/null || echo 0)" -gt 10485760 ]; then
+      mv "$STREAM_LOG" "$STREAM_LOG.old" 2>/dev/null || true
+    fi
+    OUT="$( { cd "$DIR" && \
+      timeout --signal=TERM --kill-after=30 "$WORK_TO" \
+      "$OPENCODE" run --format json --model "$M" "${VARIANT_ARGS[@]}" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}"; echo $? >"$OCRC"; } 2>>"$ERRTMP" | \
+      tee "$STREAM_LOG" | \
       python3 -c '
 import sys, json
 texts = []
@@ -310,8 +439,9 @@ print("".join(texts))
       continue
     fi
     rm -f "$ERRTMP"
-    echo "[$(ts)] OK model=$M" >> "$LOG"
+    echo "[$(ts)] OK model=$M variant=${V:-default}" >> "$LOG"
     USED_MODEL="$M"
+    USED_VARIANT="$V"
     break
   done
 
@@ -323,11 +453,12 @@ print("".join(texts))
 Task: ${TASK:0:160}…
 Log: $RUNS_DIR/${RUN_ID}.log"
     fi
+
     return 1
   fi
 
   # ---- success path ---------------------------------------------------------
-  printf 'opencode model selected: %s\n\n' "$USED_MODEL"
+  printf "opencode using configured model\n\n"
   printf '%s\n' "$OUT"
 
   # Trailer verification (mechanical — do not trust model adherence).
@@ -354,7 +485,9 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   fi
   echo ""
   echo "=== LOOP CLOSER (wrapper) ==="
+  echo "effort profile: ${EFFORT_PROFILE:-static}"
   echo "model: $USED_MODEL"
+  echo "variant: ${USED_VARIANT:-default}"
   [ -n "$FAIL_SUMMARY" ] && echo "fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
   echo "branch: $branch"
   echo "trailer: $TRAILER_OK"
@@ -387,11 +520,13 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   fi
   echo "=== END LOOP CLOSER ==="
   echo "MODEL_USED=$USED_MODEL" >&2
+  echo "VARIANT_USED=${USED_VARIANT:-default}" >&2
 
   # Async completion push to the project thread (fg already shows all of this inline).
   if [ "$MODE" = bg ]; then
-    local msg
-    msg="✅ coder dispatch ${RUN_ID} done on \`$USED_MODEL\`"
+    msg="✅ coder dispatch ${RUN_ID} done (opencode-configured model)
+effort profile: ${EFFORT_PROFILE:-static}
+variant: ${USED_VARIANT:-default}"
     [ -n "$FAIL_SUMMARY" ] && msg="$msg
 fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
     msg="$msg
@@ -431,6 +566,12 @@ $pr_url"
           else
             send_tg "✅ PR #$pr_num CI: all checks green — ready for human merge.
 $pr_url"
+            # Trigger an immediate gate sweep so the merge button appears now,
+            # without waiting for the next on-demand /gate sweep.
+            if [ -x "$GATE_SCRIPT" ]; then
+              bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
+              echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
+            fi
           fi
           echo "[$(ts)] CI verdict sent PR#$pr_num fails='$fails'" >> "$LOG"
           exit 0
@@ -440,6 +581,7 @@ $pr_url"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
   fi
+
   return 0
 }
 
@@ -447,7 +589,7 @@ $pr_url"
 if [ "$WORKER" = 1 ]; then
   # Worker: inherits the flock fd 9 from the parent; lock releases when we exit
   # (the CI watcher closes its copy explicitly).
-  echo "pid=$$ started=$(ts) mode=worker task=${TASK:0:80}" > "$LOCK.holder"
+  echo "pid=$$ started=$(ts) mode=worker effort=${EFFORT_PROFILE:-static} task=${TASK:0:80}" > "$LOCK.holder"
   run_dispatch
   rc=$?
   rm -f "$LOCK.holder" 2>/dev/null
@@ -465,7 +607,7 @@ if ! flock -n 9; then
 fi
 
 if [ "$MODE" = fg ]; then
-  echo "pid=$$ started=$(ts) mode=fg task=${TASK:0:80}" > "$LOCK.holder"
+  echo "pid=$$ started=$(ts) mode=fg effort=${EFFORT_PROFILE:-static} task=${TASK:0:80}" > "$LOCK.holder"
   run_dispatch
   rc=$?
   rm -f "$LOCK.holder" 2>/dev/null
@@ -473,7 +615,7 @@ if [ "$MODE" = fg ]; then
 fi
 
 RUN_ID="run-$(date +%Y%m%d-%H%M%S)-$RANDOM"
-echo "pid=parent started=$(ts) mode=bg id=$RUN_ID task=${TASK:0:80}" > "$LOCK.holder"
+echo "pid=parent started=$(ts) mode=bg id=$RUN_ID effort=${EFFORT_PROFILE:-static} task=${TASK:0:80}" > "$LOCK.holder"
 setsid bash "$0" --worker "$RUN_ID" --dir "$DIR" "$TASK" \
   >>"$RUNS_DIR/$RUN_ID.log" 2>&1 </dev/null &
 disown 2>/dev/null || true

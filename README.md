@@ -7,7 +7,7 @@ One Telegram thread. A research agent (**EDGE**, running in [OpenClaw](https://o
 ```text
 you (Telegram) ──"go"──▶ EDGE ──dispatch──▶ wrapper ──tier ladder──▶ coder ──▶ PR
       ▲                                       │                                │
-      │◀── plain-lingo summary + options ─────┘◀── ✅ done (model/branch/PR) ───┤
+      │◀── plain-lingo summary + options ─────┘◀── ✅ done (effort/branch/PR) ───┤
       │◀────────────────────────────────────────── ✅ CI green, ready to merge ─┘
       └── you approve — merge on GitHub, or one tap on the gate's ✅ button
           (approval stays yours; the agent only executes it)
@@ -26,11 +26,13 @@ Everything lives in a single workspace directory (`~/.openclaw/workspace-${AGENT
 ├── templates/                               (north-star-spec.md, etc.)
 ├── projects/<slug>/                         (git clone of project repo)
 ├── context/<slug>/notes/                    (EDGE research context)
-├── config/edge-rdd/<slug>.env               (dispatch config)
+├── config/edge-rdd/config.env               (dispatch config: primary project + model ladder)
+├── config/edge-rdd/research.env             (OpenScience research dispatch)
 ├── config/edge-rdd/gate.env                 (PR gate hub)
 ├── config/opencode/agents/code-monkeys/     (coder, reviewer, _shared)
 ├── skills/gate/SKILL.md                     (/gate command)
-└── scripts/edge-{coder-run,pr-gate}.sh      (dispatch scripts)
+├── skills/research/SKILL.md                 (/research command)
+└── scripts/                                 (dispatch + PR gate + research scripts)
 ```
 
 System paths (`~/.config/edge-rdd`, `~/.openclaw/skills/gate`, etc.) are symlinked to the workspace, so the runtime finds them without special configuration. **Single source of truth, easy backup, easy migration.**
@@ -39,7 +41,8 @@ System paths (`~/.config/edge-rdd`, `~/.openclaw/skills/gate`, etc.) are symlink
 
 | Piece | File(s) | What it does |
 |---|---|---|
-| **Dispatch wrapper** | `scripts/edge-coder-run.sh` | The heart. Async dispatch with per-repo locking, an **ordered model-fallback ladder** (opencode has none natively), per-tier timeouts, failure classification (rate-limit/quota/auth/…), **partial-work handoff** between tiers, mandatory machine-readable completion trailer, automatic completion + CI-verdict push to your chat thread |
+| **Dispatch wrapper** | `scripts/edge-coder-run.sh` | The heart. Async dispatch with per-repo locking, an **ordered model-fallback ladder** (opencode has none natively) with per-tier **liveness probes**, an **effort policy** (auto-classified fast/standard/deep/max, per-tier variant maps, `[effort=…]` prefixes), failure classification (probe-fail/rate-limit/quota/auth/…), **partial-work handoff** between tiers, mandatory machine-readable completion trailer, automatic completion + CI-verdict push to your chat thread, and a CI-green → gate-sweep trigger |
+| **Research companion** | `openscience/`, `openclaw/skills/research/`, `scripts/openscience-*` | Optional second oracle: a local, systemd-hardened, **research-only** OpenScience workbench driven by the `/research` skill — async packets with Accept/Reject buttons, a per-project knowledge base, and the [dual-research protocol](docs/research-protocol.md). Bring your own models |
 | **Coder agents** | `opencode/agents/code-monkeys/` | Primary coder + independent read-only reviewer + shared doctrine. Permission maps tuned for **non-interactive** dispatch (no `ask` traps), with hard denies on merges, force-pushes, and secrets |
 | **Research agent** | `openclaw/agent.edge.json5`, `openclaw/topic.project-thread.json5` | OpenClaw agent definition + Telegram topic binding with the full async-dispatch operating instructions baked into the system prompt |
 | **Agent workspace** | `workspace-edge/` | Project charter (the 10-point evidence-driven engineering operating loop) + the plain-lingo **communication contract** + RESUME.md restart packet |
@@ -52,7 +55,7 @@ System paths (`~/.config/edge-rdd`, `~/.openclaw/skills/gate`, etc.) are symlink
 | **Repo handoff docs** | `project-repo/docs/agent/` | The git-tracked protocol both sides read: `PROJECT_STATE` · `TASKS` · `QUALITY_GATES` · `KNOWLEDGE_STAGING` · `RESEARCH_TRANSFER` · `EDGE_COLLABORATION` |
 | **GitHub gate** | `github/protect-branch.sh`, `project-repo/.github/workflows/ci.yml.example` | One-command branch protection (required checks, up-to-date branch, no force-push, admins included, 0 approvals — *you* are the approval) |
 | **PR gate** | `scripts/edge-pr-gate.sh` | Run `/gate sweep` to check every project repo — green PRs, CI verdicts, stray branches — and post **one-tap approval buttons** (per item, plus **Do-all**), each with a what/consequence/why brief, into **one gate thread**. You tap ✅ (or react 👍, or type `/gate`), the agent re-verifies and executes the merge / branch cleanup, and every repo converges back to **trunk-only**. See [The PR gate](#the-pr-gate-approve-merges-with-one-tap) |
-| **Installer** | `install.sh`, `uninstall.sh`, `template.env.example` | Workspace-first install: creates `~/.openclaw/workspace-${AGENT_ID}/`, clones project repo, creates symlinks, generates `<slug>.env` config. Uninstall with `--purge` (keeps repos) or `--purge-all` (removes everything) |
+| **Installer** | `install.sh`, `uninstall.sh`, `template.env.example` | Workspace-first install: creates `~/.openclaw/workspace-${AGENT_ID}/`, clones project repo, creates symlinks, generates the `config.env`/`gate.env`/`research.env` configs. Uninstall with `--purge` (keeps repos) or `--purge-all` (removes everything) |
 | **Thread bootstrap** | `scripts/kickoff.sh`, `messages/` | One-shot first-boot handshake: **preflights the GitHub connection** (gh auth, reachable repo, matching clone, protection), then posts the development-kickoff + pinnable **command palette** into the project thread |
 
 ## The five ideas that make it work
@@ -60,7 +63,7 @@ System paths (`~/.config/edge-rdd`, `~/.openclaw/skills/gate`, etc.) are symlink
 1. **Files are the protocol, chat is the trigger.** Work orders, promoted research, research requests, and reality feedback live in git-tracked docs both runtimes read. The loop survives restarts, context compaction, and model swaps.
 2. **Research and implementation never blur.** The research agent cannot touch git; the coder cannot originate architecture decisions. Each hands off through explicit, templated documents — including *reality feedback* when a proposal loses to the real codebase (the anti-hallucination loop).
 3. **The human gate is mechanical.** Agents physically cannot push to the trunk — GitHub rejects it. Everything lands as a PR with green required checks, and nothing merges without the operator's explicit approval — in the GitHub UI, or with one tap on a [PR-gate button](#the-pr-gate-approve-merges-with-one-tap) (the agent executes, but only after your tap). This is why agent permissions can be permissive enough to actually work unattended.
-4. **Fallback is owned, visible, and resumable.** The wrapper's model tier ladder classifies every failure (`rate-limited → deepseek-v4-pro` in the completion message), and a failed tier's partial work is handed to the next tier with "continue, don't restart".
+4. **Fallback is owned, visible, and resumable.** The wrapper's model tier ladder probes each tier before trusting it, classifies every failure (a `fallback path: model-a: rate-limited → model-b` line in the completion message), and hands a failed tier's partial work to the next tier with "continue, don't restart".
 5. **Trust nothing you can verify.** The wrapper checks the completion trailer mechanically, resolves branch/commits/PR from git itself, and posts what actually happened — not what the model claims happened.
 
 ## The PR gate: approve merges with one tap
