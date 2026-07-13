@@ -40,6 +40,12 @@ class SuperiorArchitectureValidatorTests(unittest.TestCase):
         self.assertIn("scaffold/placeholder", result.stdout)
         self.assertIn("MODEL_ACTION", result.stdout)
 
+    def test_invalid_spec_never_authorizes_model_synthesis(self):
+        result = self.run_validator(spec="{{PROJECT_NAME}}", architecture="# architecture\n", heartbeat=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("authoritative spec is empty", result.stdout)
+        self.assertNotIn("MODEL_ACTION", result.stdout)
+
     def test_substantive_sourced_versioned_fresh_document_passes(self):
         today = dt.date.today().isoformat()
         architecture = f"""---
@@ -68,6 +74,23 @@ The best-known choice is supported by field evidence and compared against a conc
         result = self.run_validator(spec="product definition " * 80, architecture=architecture)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS:", result.stdout)
+
+    def test_future_updated_date_is_rejected(self):
+        future = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        architecture = f"""---
+status: living
+updated: {future}
+sources: [S1]
+---
+# Architecture
+""" + ("Substantive evidence and rival mechanism. " * 60) + f"""
+| Version | Date | Change | Evidence |
+|---|---|---|---|
+| v1.0 | {future} | synthesis | S1 |
+"""
+        result = self.run_validator(spec="product definition " * 80, architecture=architecture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("updated is in the future", result.stdout)
 
 
 if __name__ == "__main__":

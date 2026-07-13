@@ -10,7 +10,17 @@ if [[ " $* " == *" -X PUT "* ]]; then
   cat >"$CAPTURE"
   echo '{}'
 else
-  echo '[]'
+  python3 - "$CAPTURE" <<'PY'
+import json, sys
+request = json.load(open(sys.argv[1]))
+print(json.dumps({
+  "required_status_checks": request["required_status_checks"] if request["required_status_checks"]["contexts"] else None,
+  "enforce_admins": {"enabled": request["enforce_admins"]},
+  "required_pull_request_reviews": request["required_pull_request_reviews"],
+  "allow_force_pushes": {"enabled": request["allow_force_pushes"]},
+  "allow_deletions": {"enabled": request["allow_deletions"]},
+}))
+PY
 fi
 '''
 
@@ -28,7 +38,7 @@ class ProtectBranchTests(unittest.TestCase):
             result = subprocess.run([str(SCRIPT)], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('"contexts": []', capture.read_text())
-            self.assertIn("Verified required checks: []", result.stdout)
+            self.assertIn("Verified protection posture with required checks: []", result.stdout)
 
 
 if __name__ == "__main__":

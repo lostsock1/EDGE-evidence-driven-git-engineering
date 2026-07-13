@@ -157,8 +157,7 @@ symlink() { # symlink <target> <link>
 }
 
 # 1. Create workspace structure
-mkdir -p "$WORKSPACE"/{projects,context,config/edge-rdd,config/opencode/agents,skills,scripts}
-mkdir -p "$WORKSPACE/context/${RDD_PROJECT_SLUG}/notes"
+mkdir -p "$WORKSPACE"/{projects,config/edge-rdd,config/opencode/agents,skills,scripts}
 mkdir -p "$STATE_DIR"/{runs,locks,pr-gate}
 
 # 2. Workspace docs (SOUL.md, AGENTS.md, etc.)

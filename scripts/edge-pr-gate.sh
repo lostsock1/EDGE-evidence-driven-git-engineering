@@ -280,37 +280,66 @@ def pr_checks_verdict(slug, number, required):
     """Return a strict CI verdict and explanation."""
     rc, out, err = run(["gh", "pr", "checks", str(number), "-R", slug,
                         "--json", "name,bucket"], timeout=30)
+    # `gh pr checks` may exit nonzero when valid JSON contains failed checks,
+    # so parse stdout whenever present. A nonzero with no JSON is unavailable,
+    # except GitHub's explicit no-checks response.
     if not out:
+        if "no checks" in (err or "").lower():
+            return "no-ci", "no checks reported"
+        if rc != 0:
+            return "unavailable", f"checks query failed ({(err or f'rc={rc}')[:160]})"
         return "no-ci", "no checks reported"
     try:
         checks = json.loads(out)
     except json.JSONDecodeError:
-        return "no-ci", "checks response was not JSON"
+        return "unavailable", "checks response was not JSON"
     if not checks:
         return "no-ci", "no checks reported"
     by_name = {c.get("name"): c.get("bucket") for c in checks}
+    if any(c.get("bucket") == "fail" for c in checks):
+        return "red", "failing checks present"
     missing = [name for name in required if name not in by_name]
     if missing:
         return "missing-required", "missing required: " + ", ".join(missing)
-    if any(c.get("bucket") == "fail" for c in checks):
-        return "red", "failing checks present"
     if any(c.get("bucket") != "pass" for c in checks):
         return "pending", "checks not all passed"
     return "green", "all checks passed; required contexts present"
 
 
+_GH_LOGIN = None
+
+
+def current_gh_login():
+    """Resolve the authenticated account that is allowed to attest markers."""
+    global _GH_LOGIN
+    if _GH_LOGIN:
+        return _GH_LOGIN, None
+    user, err = gh_json(["api", "user"], timeout=20)
+    if not isinstance(user, dict) or not user.get("login"):
+        return None, err or "authenticated GitHub login unavailable"
+    _GH_LOGIN = user["login"]
+    return _GH_LOGIN, None
+
+
 def reviewer_gate(slug, number, head_sha):
+    expected_author, author_err = current_gh_login()
+    if not expected_author:
+        return False, f"review marker author unavailable ({author_err})"
     comments, err = gh_json(["api", f"repos/{slug}/issues/{number}/comments?per_page=100"], timeout=30)
     if comments is None:
         return False, f"review marker unavailable ({err})"
     pattern = re.compile(r"<!-- edge-review-gate sha=([0-9a-f]+) class=(trivial|nontrivial) verdict=([a-z-]+) ready=(yes|no) trust=model-reported -->")
     for comment in reversed(comments):
+        if comment.get("user", {}).get("login") != expected_author:
+            continue
         match = pattern.search(comment.get("body", ""))
         if match and match.group(1) == head_sha:
-            if match.group(4) == "yes":
-                return True, f"review={match.group(3)} ({match.group(2)}; model-reported)"
-            return False, f"review={match.group(3)} ({match.group(2)}; not ready)"
-    return False, "missing reviewer marker for current head"
+            task_class, verdict, ready = match.group(2), match.group(3), match.group(4)
+            internally_eligible = task_class == "trivial" or verdict in ("pass", "pass-with-risks")
+            if ready == "yes" and internally_eligible:
+                return True, f"review={verdict} ({task_class}; model-reported by {expected_author})"
+            return False, f"review={verdict} ({task_class}; not ready or inconsistent marker)"
+    return False, f"missing reviewer marker by {expected_author} for current head"
 
 
 def gather(proj):
@@ -322,7 +351,7 @@ def gather(proj):
         return None, f"cannot resolve GitHub repo ({err}) — skipped"
 
     prs, err = gh_json(["pr", "list", "-R", slug, "--state", "open", "--json",
-                        "number,title,headRefName,headRefOid,isDraft,url"], timeout=30)
+                        "number,title,headRefName,headRefOid,baseRefName,isDraft,url"], timeout=30)
     if prs is None:
         return None, f"gh pr list failed ({err}) — skipped"
     for pr in prs:
@@ -436,13 +465,16 @@ def desired_actions(proj, facts):
     """key -> action template. Only things an operator can approve."""
     out = {}
     for pr in facts["prs"]:
-        if pr["isDraft"] or pr["verdict"] != "green" or not pr["review_ready"]:
+        if (pr["isDraft"] or pr["baseRefName"] != proj["trunk"]
+                or pr["verdict"] != "green" or not pr["review_ready"]):
             continue
-        key = f"merge:{pr['number']}"
+        # Bind approval to the exact reviewed head. A new commit supersedes the
+        # old action and requires a fresh operator-facing ask.
+        key = f"merge:{pr['number']}:{pr['headRefOid']}"
         note = f" ({pr['review_detail']})"
         out[key] = {
             "kind": "merge", "pr": pr["number"], "branch": pr["headRefName"],
-            "title": pr["title"][:60], "url": pr["url"],
+            "head_sha": pr["headRefOid"], "title": pr["title"][:60], "url": pr["url"],
             "desc": f"merge PR #{pr['number']} “{pr['title'][:48]}” into "
                     f"{proj['trunk']}{note}, then delete {pr['headRefName']}",
             "button": f"✅ Merge PR #{pr['number']}: {pr['title'][:28]}",
@@ -475,8 +507,9 @@ def sweep(dry=False):
 
             # info lines
             red = [p for p in facts["prs"] if p["verdict"] == "red"]
-            pend = [p for p in facts["prs"] if p["verdict"] in ("pending", "missing-required", "no-ci")]
-            review_blocked = [p for p in facts["prs"] if p["verdict"] == "green" and not p["review_ready"]]
+            pend = [p for p in facts["prs"] if p["verdict"] in ("pending", "missing-required", "no-ci", "unavailable")]
+            wrong_base = [p for p in facts["prs"] if p["baseRefName"] != proj["trunk"]]
+            review_blocked = [p for p in facts["prs"] if p["baseRefName"] == proj["trunk"] and p["verdict"] == "green" and not p["review_ready"]]
             drafts = [p for p in facts["prs"] if p["isDraft"]]
             print(f"  repo {facts['slug']}: {len(facts['branches'])} branch(es), "
                   f"{len(facts['prs'])} open PR(s)")
@@ -484,6 +517,8 @@ def sweep(dry=False):
                 print(f"  ❌ PR #{p['number']} CI RED — {p['title'][:60]} {p['url']}")
             for p in pend:
                 print(f"  ⏳ PR #{p['number']} CI {p['verdict']} ({p['verdict_detail']}) — {p['title'][:60]}")
+            for p in wrong_base:
+                print(f"  ⛔ PR #{p['number']} targets {p['baseRefName']}, not protected trunk {proj['trunk']} — {p['title'][:60]}")
             for p in review_blocked:
                 print(f"  ⛔ PR #{p['number']} reviewer gate blocked ({p['review_detail']}) — {p['title'][:60]}")
             for p in drafts:
@@ -511,7 +546,7 @@ def sweep(dry=False):
                 actions.append((aid, a))
 
             if not actions:
-                if red or pend or review_blocked:
+                if red or pend or wrong_base or review_blocked:
                     all_clean = False
                     print("  no approvals needed (CI/reviewer-blocked PRs ride the coder loop)")
                 else:
@@ -548,13 +583,16 @@ def sweep(dry=False):
             for aid, a in shown:
                 lines.append(action_explainer(a))
                 lines.append("")
-            if red or pend or review_blocked:
+            if red or pend or wrong_base or review_blocked:
                 aware = []
                 for p in red:
                     aware.append(f"   • PR #{p['number']} CI is RED — {p['title'][:50]} "
                                  f"(I won't offer a red PR; it goes back through the coder loop)")
                 for p in pend:
                     aware.append(f"   • PR #{p['number']} CI is {p['verdict']} — {p['verdict_detail']} "
+                                 f"(not merge-actionable)")
+                for p in wrong_base:
+                    aware.append(f"   • PR #{p['number']} targets {p['baseRefName']}, not protected trunk {proj['trunk']} "
                                  f"(not merge-actionable)")
                 for p in review_blocked:
                     aware.append(f"   • PR #{p['number']} reviewer gate blocked — {p['review_detail']} "
@@ -706,15 +744,17 @@ def execute(a, proj):
 
     if a["kind"] == "merge":
         pr, err = gh_json(["pr", "view", str(a["pr"]), "-R", slug, "--json",
-                           "state,isDraft,headRefName,title,url"], timeout=25)
+                           "state,isDraft,headRefName,headRefOid,baseRefName,title,url"], timeout=25)
         if pr is None:
             return f"could not re-verify PR #{a['pr']} ({err})", False
         if pr["state"] != "OPEN" or pr["isDraft"]:
             return f"PR #{a['pr']} is {pr['state']}{' (draft)' if pr['isDraft'] else ''} — not merging", False
+        if pr["baseRefName"] != trunk:
+            return f"PR #{a['pr']} now targets {pr['baseRefName']}, not protected trunk {trunk} — not merging", False
+        if pr["headRefName"] != a["branch"] or pr["headRefOid"] != a.get("head_sha"):
+            return f"PR #{a['pr']} head changed after approval — run a fresh gate sweep", False
         verdict, detail = pr_checks_verdict(slug, a["pr"], proj["required_checks"])
-        rc, head_sha, _ = run(["gh", "pr", "view", str(a["pr"]), "-R", slug,
-                               "--json", "headRefOid", "--jq", ".headRefOid"], timeout=25)
-        review_ready, review_detail = reviewer_gate(slug, a["pr"], head_sha if rc == 0 else "")
+        review_ready, review_detail = reviewer_gate(slug, a["pr"], pr["headRefOid"])
         if verdict != "green":
             return f"PR #{a['pr']} checks are {verdict} ({detail}) now — not merging", False
         if not review_ready:

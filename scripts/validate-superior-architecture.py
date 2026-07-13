@@ -33,7 +33,7 @@ def parse_frontmatter(text: str) -> dict[str, str]:
     return values
 
 
-def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], list[str], Path, Path]:
+def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], list[str], Path, Path, bool]:
     notes = workspace / "projects" / slug / "notes"
     spec = notes / f"{slug}-north-star.md"
     arch = notes / "SUPERIOR_ARCHITECTURE.md"
@@ -41,6 +41,7 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
     warnings: list[str] = []
 
     candidates = [p for p in notes.glob("*.md") if "north" in p.name.lower() and "star" in p.name.lower() and p.name.lower() != "superior_architecture.md"] if notes.exists() else []
+    spec_valid = False
     if not spec.is_file():
         blockers.append(f"missing authoritative spec: {spec}")
         if candidates:
@@ -49,10 +50,12 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
         spec_text = spec.read_text(errors="replace")
         if len(spec_text.strip()) < 500 or any(re.search(p, spec_text, re.I | re.M) for p in (r"\{\{", r"YYYY-MM-DD", r"<project")):
             blockers.append("authoritative spec is empty, too short, or still contains template placeholders")
+        else:
+            spec_valid = True
 
     if not arch.is_file():
         blockers.append(f"missing Superior Architecture: {arch}")
-        return blockers, warnings, spec, arch
+        return blockers, warnings, spec, arch, spec_valid
 
     text = arch.read_text(errors="replace")
     fm = parse_frontmatter(text)
@@ -63,7 +66,7 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
         blockers.append("Superior Architecture is too short to be a substantive synthesis")
 
     sources = fm.get("sources", "")
-    source_rows = re.findall(r"^\|\s*S\d+\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", text, re.M)
+    source_rows = re.findall(r"^\|\s*S?\d+\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", text, re.M)
     if sources in ("", "[]") and not source_rows:
         blockers.append("sources are missing (frontmatter sources and Sources index are empty)")
 
@@ -79,13 +82,31 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
         updated_date = None
     if updated_date:
         age = (dt.date.today() - updated_date).days
-        if age > max_age_days:
+        if age < 0:
+            blockers.append(f"frontmatter updated is in the future: {updated_date.isoformat()}")
+        elif age > max_age_days:
             blockers.append(f"Superior Architecture is stale: updated {age} days ago (limit {max_age_days})")
-        authoritative = [p for p in notes.glob("*.md") if p != arch and p.is_file()]
-        newer = [p.name for p in authoritative if dt.date.fromtimestamp(p.stat().st_mtime) > updated_date]
+
+        # Filesystem mtimes change on copy/clone and are not evidence dates.
+        # Compare only explicitly named local Markdown sources that themselves
+        # declare a concrete frontmatter `updated` date.
+        local_names = set(re.findall(r"[A-Za-z0-9_.-]+\.md", sources))
+        local_names.add(spec.name)
+        newer = []
+        for name in sorted(local_names):
+            source = notes / name
+            if source == arch or not source.is_file():
+                continue
+            source_updated = parse_frontmatter(source.read_text(errors="replace")).get("updated", "")
+            try:
+                source_date = dt.date.fromisoformat(source_updated)
+            except ValueError:
+                continue
+            if source_date > updated_date:
+                newer.append(name)
         if newer:
-            blockers.append("authoritative inputs newer than synthesis: " + ", ".join(sorted(newer)))
-    return blockers, warnings, spec, arch
+            blockers.append("authoritative inputs newer than synthesis: " + ", ".join(newer))
+    return blockers, warnings, spec, arch, spec_valid
 
 
 def main() -> int:
@@ -95,13 +116,13 @@ def main() -> int:
     parser.add_argument("--max-age-days", type=int, default=45)
     parser.add_argument("--heartbeat", action="store_true", help="emit a safe model-synthesis instruction when appropriate")
     args = parser.parse_args()
-    blockers, warnings, spec, arch = validate(args.workspace, args.project, args.max_age_days)
+    blockers, warnings, spec, arch, spec_valid = validate(args.workspace, args.project, args.max_age_days)
     for warning in warnings:
         print(f"WARNING: {warning}")
     if blockers:
         for blocker in blockers:
             print(f"BLOCKED: {blocker}")
-        if args.heartbeat and spec.is_file():
+        if args.heartbeat and spec_valid:
             print(f"MODEL_ACTION: Read {spec} and authoritative project evidence, then author {arch}; do not invent missing product definitions or sources.")
         return 1
     print(f"PASS: {arch} is substantive, sourced, versioned, and fresh")

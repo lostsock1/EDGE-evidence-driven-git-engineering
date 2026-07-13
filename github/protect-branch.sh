@@ -59,20 +59,37 @@ gh api -X PUT "repos/$OWNER/$REPO/branches/$BRANCH/protection" --input - <<JSON
 }
 JSON
 
-ACTUAL_JSON="$(gh api "repos/$OWNER/$REPO/branches/$BRANCH/protection" \
-  --jq '.required_status_checks.contexts | sort')"
-EXPECTED_JSON="$(python3 - "$CONTEXTS_JSON" <<'PY'
+ACTUAL_PROTECTION="$(gh api "repos/$OWNER/$REPO/branches/$BRANCH/protection")"
+python3 - "$CONTEXTS_JSON" "$ACTUAL_PROTECTION" <<'PY'
 import json, sys
-print(json.dumps(sorted(json.loads(sys.argv[1])), separators=(",", ":")))
+expected = sorted(json.loads(sys.argv[1]))
+actual = json.loads(sys.argv[2])
+
+def enabled(name):
+    value = actual.get(name)
+    return value is True or (isinstance(value, dict) and value.get("enabled") is True)
+
+errors = []
+checks = actual.get("required_status_checks")
+contexts = sorted((checks or {}).get("contexts") or [])
+if contexts != expected:
+    errors.append(f"contexts expected {expected!r}, got {contexts!r}")
+# GitHub normalizes an explicit empty context list to null. Strictness is only
+# meaningful/verifiable when at least one required check exists.
+if expected and (not checks or checks.get("strict") is not True):
+    errors.append("required_status_checks.strict is not true")
+if not enabled("enforce_admins"):
+    errors.append("enforce_admins is not enabled")
+reviews = actual.get("required_pull_request_reviews") or {}
+if reviews.get("required_approving_review_count") != 0:
+    errors.append("required approving review count is not 0")
+for setting in ("allow_force_pushes", "allow_deletions"):
+    value = actual.get(setting)
+    is_enabled = value is True or (isinstance(value, dict) and value.get("enabled") is True)
+    if is_enabled:
+        errors.append(f"{setting} is enabled")
+if errors:
+    print("protect-branch: verification failed: " + "; ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+print("Done. Verified protection posture with required checks: " + json.dumps(contexts, separators=(",", ":")))
 PY
-)"
-ACTUAL_COMPACT="$(python3 - "$ACTUAL_JSON" <<'PY'
-import json, sys
-print(json.dumps(json.loads(sys.argv[1]), separators=(",", ":")))
-PY
-)"
-if [ "$ACTUAL_COMPACT" != "$EXPECTED_JSON" ]; then
-  echo "protect-branch: verification failed: expected $EXPECTED_JSON, got $ACTUAL_COMPACT" >&2
-  exit 1
-fi
-echo "Done. Verified required checks: $ACTUAL_COMPACT"

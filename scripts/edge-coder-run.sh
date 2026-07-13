@@ -140,6 +140,34 @@ send_tg() { # send_tg "<message>"  (best-effort; EDGE_CODER_DRYRUN_MSG=1 prints 
     "${thread_args[@]}" --message "$msg" >>"$LOG" 2>&1
 }
 
+strict_ci_verdict() { # strict_ci_verdict '<checks-json>' -> verdict<TAB>detail
+  python3 - "${RDD_REQUIRED_CHECKS:-}" "$1" <<'PY'
+import json, sys
+required = [x.strip() for x in sys.argv[1].split(",") if x.strip()]
+try:
+    checks = json.loads(sys.argv[2])
+except Exception:
+    print("unavailable\tchecks response was not JSON")
+    raise SystemExit
+if not checks:
+    print("no-ci\tno checks reported")
+    raise SystemExit
+by_name = {c.get("name"): c.get("bucket") for c in checks}
+if any(c.get("bucket") == "fail" for c in checks):
+    failed = ", ".join(c.get("name", "unnamed") for c in checks if c.get("bucket") == "fail")
+    print(f"red\tfailing checks: {failed}")
+    raise SystemExit
+missing = [name for name in required if name not in by_name]
+if missing:
+    print("missing-required\tmissing required: " + ", ".join(missing))
+    raise SystemExit
+if any(c.get("bucket") != "pass" for c in checks):
+    print("pending\tchecks not all passed")
+    raise SystemExit
+print("green\tall checks passed; required contexts present")
+PY
+}
+
 # ---- arg parsing ------------------------------------------------------------
 MODE=bg
 WORKER=0
@@ -628,32 +656,47 @@ full output: $RUNS_DIR/${RUN_ID}.log"
       while [ $n -lt $CI_POLL_MAX ]; do
         sleep $CI_POLL_SECS
         n=$((n+1))
-        checks="$(cd "$DIR" && timeout 25 gh pr checks "$pr_num" --json name,bucket 2>/dev/null)" || continue
+        # `gh pr checks` can exit nonzero while still emitting valid JSON for
+        # failed checks; never discard parseable stdout because of its rc.
+        checks="$(cd "$DIR" && timeout 25 gh pr checks "$pr_num" --json name,bucket 2>/dev/null)"
         [ -n "$checks" ] || continue
-        pending="$(printf '%s' "$checks" | jq '[.[]|select(.bucket=="pending")]|length' 2>/dev/null || echo 1)"
-        if [ "$pending" = "0" ]; then
-          fails="$(printf '%s' "$checks" | jq -r '[.[]|select(.bucket=="fail")|.name]|join(", ")' 2>/dev/null)"
-          if [ -n "$fails" ]; then
-            send_tg "❌ PR #$pr_num CI: FAILED — $fails
+        ci_state="$(strict_ci_verdict "$checks")"
+        ci_verdict="${ci_state%%$'\t'*}"
+        ci_detail="${ci_state#*$'\t'}"
+        case "$ci_verdict" in
+          pending|no-ci) continue ;;
+          red)
+            send_tg "❌ PR #$pr_num CI: FAILED — $ci_detail
 $pr_url"
-          elif [ "$TASK_CLASS" = nontrivial ] && { [ "$TRAILER_OK" != yes ] || [[ "$REVIEWER_VERDICT" != pass* ]]; }; then
-            send_tg "⛔ PR #$pr_num CI is green, but reviewer verdict is $REVIEWER_VERDICT — NOT gate-ready. This verdict is parsed from model output and cannot prove reviewer execution.
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+          missing-required|unavailable)
+            send_tg "⛔ PR #$pr_num CI is not gate-ready — $ci_detail
 $pr_url"
-          else
-            send_tg "✅ PR #$pr_num CI: all checks green; reviewer gate eligible — ready for human merge. Reviewer evidence is model-reported, not independently provable by the wrapper.
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+          green)
+            if [ "$TASK_CLASS" = nontrivial ] && { [ "$TRAILER_OK" != yes ] || [[ "$REVIEWER_VERDICT" != pass* ]]; }; then
+              send_tg "⛔ PR #$pr_num CI is green, but reviewer verdict is $REVIEWER_VERDICT — NOT gate-ready. This verdict is parsed from model output and cannot prove reviewer execution.
 $pr_url"
-            # Trigger an immediate gate sweep so the merge button appears now,
-            # without waiting for the next on-demand /gate sweep.
-            if [ -x "$GATE_SCRIPT" ]; then
-              bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
-              echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
+            else
+              send_tg "✅ PR #$pr_num CI: all checks green, all named contexts present; reviewer gate eligible — ready for human merge. Reviewer evidence is model-reported, not independently provable by the wrapper.
+$pr_url"
+              # Trigger an immediate gate sweep so the merge button appears now,
+              # without waiting for the next on-demand /gate sweep.
+              if [ -x "$GATE_SCRIPT" ]; then
+                bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
+                echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
+              fi
             fi
-          fi
-          echo "[$(ts)] CI verdict sent PR#$pr_num fails='$fails'" >> "$LOG"
-          exit 0
-        fi
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+        esac
       done
-      send_tg "⏳ PR #$pr_num CI: still pending after $((CI_POLL_SECS*CI_POLL_MAX/60)) min — check manually: $pr_url"
+      send_tg "⏳ PR #$pr_num CI: no complete gate-ready verdict after $((CI_POLL_SECS*CI_POLL_MAX/60)) min (pending or no checks reported) — check manually: $pr_url"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
   fi

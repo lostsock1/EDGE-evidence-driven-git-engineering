@@ -14,15 +14,18 @@ mode = os.environ.get("FAKE_CHECK_MODE", "green")
 if args[:2] == ["repo", "view"]:
     print("owner/repo")
 elif args[:2] == ["pr", "list"]:
-    print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "isDraft": False, "url": "https://example/pr/1"}]))
+    print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "isDraft": False, "url": "https://example/pr/1"}]))
 elif args[:2] == ["pr", "checks"]:
     if mode == "no-ci": print("[]")
     elif mode == "missing": print(json.dumps([{"name":"tests","bucket":"pass"}]))
     else: print(json.dumps([{"name":"tests","bucket":"pass"},{"name":"lint","bucket":"pass"}]))
+elif args[:2] == ["api", "user"]:
+    print(json.dumps({"login":"trusted-bot"}))
 elif args and args[0] == "api" and "issues/1/comments" in " ".join(args):
     review = os.environ.get("FAKE_REVIEW", "pass")
+    author = os.environ.get("FAKE_REVIEW_AUTHOR", "trusted-bot")
     if review == "missing": print("[]")
-    else: print(json.dumps([{"body":f"<!-- edge-review-gate sha=abc123 class=nontrivial verdict={review} ready={'yes' if review.startswith('pass') else 'no'} trust=model-reported -->"}]))
+    else: print(json.dumps([{"user":{"login":author}, "body":f"<!-- edge-review-gate sha=abc123 class=nontrivial verdict={review} ready={'yes' if review.startswith('pass') else 'no'} trust=model-reported -->"}]))
 elif args and args[0] == "api" and "branches?" in " ".join(args):
     print("main\ncm/change")
 else:
@@ -31,7 +34,7 @@ else:
 
 
 class PrGateTests(unittest.TestCase):
-    def run_gate(self, mode, review="pass"):
+    def run_gate(self, mode, review="pass", base="main", author="trusted-bot"):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bindir = root / "bin"; bindir.mkdir()
@@ -42,7 +45,8 @@ class PrGateTests(unittest.TestCase):
             (cfg / "demo.env").write_text(f"RDD_REPO_DIR={repo}\nRDD_MAIN_BRANCH=main\n")
             env = os.environ.copy()
             env.update({"PATH": f"{bindir}:{env['PATH']}", "RDD_GATE_CONFIG_DIR": str(cfg),
-                        "RDD_GATE_STATE_DIR": str(root / "state"), "FAKE_CHECK_MODE": mode, "FAKE_REVIEW": review})
+                        "RDD_GATE_STATE_DIR": str(root / "state"), "FAKE_CHECK_MODE": mode,
+                        "FAKE_REVIEW": review, "FAKE_BASE": base, "FAKE_REVIEW_AUTHOR": author})
             return subprocess.run([str(SCRIPT), "sweep", "--dry-run"], env=env, text=True, capture_output=True)
 
     def test_all_named_required_checks_must_be_present(self):
@@ -68,6 +72,16 @@ class PrGateTests(unittest.TestCase):
                 result = self.run_gate("green", review)
                 self.assertIn("reviewer gate blocked", result.stdout)
                 self.assertNotIn("pending eg:", result.stdout)
+
+    def test_marker_from_untrusted_comment_author_is_rejected(self):
+        result = self.run_gate("green", author="random-commenter")
+        self.assertIn("missing reviewer marker by trusted-bot", result.stdout)
+        self.assertNotIn("pending eg:", result.stdout)
+
+    def test_pr_targeting_nontrunk_base_is_not_actionable(self):
+        result = self.run_gate("green", base="release")
+        self.assertIn("targets release, not protected trunk main", result.stdout)
+        self.assertNotIn("pending eg:", result.stdout)
 
 
 if __name__ == "__main__":
