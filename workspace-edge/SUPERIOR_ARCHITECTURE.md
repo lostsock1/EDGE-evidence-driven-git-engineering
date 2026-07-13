@@ -6,6 +6,9 @@ tags: [project/{{PROJECT_SLUG}}, architecture, north-star, synthesis, evidence-w
 sources: []
 # SHA-256 of projects/{{PROJECT_SLUG}}/notes/{{PROJECT_SLUG}}-north-star.md at synthesis time.
 north_star_sha256: <compute from exact spec bytes>
+# For every local *.md named in sources except the north-star (already bound above):
+# local_source_sha256: [research-note.md=<sha256>, another-note.md=<sha256>]
+local_source_sha256: []
 aliases: [Superior Architecture, North-Star Architecture]
 ---
 

@@ -24,7 +24,7 @@ class InstallSmokeTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(remote), "add", "README.md"], check=True)
             subprocess.run(["git", "-C", str(remote), "commit", "-qm", "seed"], check=True)
 
-            home = temp / "home"; home.mkdir()
+            home = temp / "home dir"; home.mkdir()
             checkout = home / "projects" / "Demo Project"
             env_text = (source / "template.env.example").read_text()
             replacements = {

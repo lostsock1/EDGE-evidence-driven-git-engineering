@@ -19,15 +19,17 @@ status: unprocessed
 """ + ("Operator product definition and non-negotiable intent. " * 30)
 
 
-def architecture_for(spec, *, date=None, sources="[S1]", include_source=True):
+def architecture_for(spec, *, date=None, sources="[S1]", include_source=True,
+                     source_entry="https://example.org/paper", local_hashes="[]"):
     date = date or dt.date.today().isoformat()
     digest = hashlib.sha256(spec.encode()).hexdigest()
-    source_rows = "| S1 | https://example.org/paper | Mechanism evidence |" if include_source else ""
+    source_rows = f"| S1 | {source_entry} | Mechanism evidence |" if include_source else ""
     return f"""---
 status: living
 updated: {date}
 sources: {sources}
 north_star_sha256: {digest}
+local_source_sha256: {local_hashes}
 ---
 # Superior Demo Architecture
 
@@ -50,7 +52,7 @@ The best-known choice is supported by field evidence and compared against a conc
 
 
 class SuperiorArchitectureValidatorTests(unittest.TestCase):
-    def run_validator(self, spec=None, architecture=None, extra_name=None, heartbeat=False):
+    def run_validator(self, spec=None, architecture=None, extra_name=None, heartbeat=False, local_files=None):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             notes = root / "projects" / "demo" / "notes"
@@ -59,6 +61,8 @@ class SuperiorArchitectureValidatorTests(unittest.TestCase):
                 (notes / "demo-north-star.md").write_text(spec)
             if extra_name:
                 (notes / extra_name).write_text("authoritative " * 100)
+            for name, content in (local_files or {}).items():
+                (notes / name).write_text(content)
             if architecture is not None:
                 (notes / "SUPERIOR_ARCHITECTURE.md").write_text(architecture)
             cmd = [str(SCRIPT), "--workspace", str(root), "--project", "demo"]
@@ -113,6 +117,28 @@ class SuperiorArchitectureValidatorTests(unittest.TestCase):
         result = self.run_validator(spec=spec, architecture=architecture_for(spec, include_source=False))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Sources index has no concrete source rows", result.stdout)
+
+    def test_declared_local_source_must_exist(self):
+        spec = valid_spec()
+        architecture = architecture_for(spec, sources="[missing.md]", source_entry="missing.md")
+        result = self.run_validator(spec=spec, architecture=architecture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("declared local source does not exist", result.stdout)
+
+    def test_changed_local_source_hash_is_rejected(self):
+        spec = valid_spec()
+        original = "accepted evidence\n"
+        digest = hashlib.sha256(original.encode()).hexdigest()
+        architecture = architecture_for(
+            spec, sources="[evidence.md]", source_entry="evidence.md",
+            local_hashes=f"[evidence.md={digest}]",
+        )
+        result = self.run_validator(
+            spec=spec, architecture=architecture,
+            local_files={"evidence.md": "changed evidence\n"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local source changed after synthesis", result.stdout)
 
     def test_changed_north_star_hash_is_rejected(self):
         spec = valid_spec()

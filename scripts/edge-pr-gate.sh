@@ -371,13 +371,20 @@ def gather(proj):
             slug, pr["number"], pr["headRefOid"])
 
     rc, out, err = run(["gh", "api", f"repos/{slug}/branches?per_page=100",
-                        "--paginate", "--jq", ".[].name"], timeout=40)
+                        "--paginate", "--jq", '.[] | [.name, .commit.sha] | @tsv'], timeout=40)
     if rc != 0:
         return None, f"branch list failed ({err[:120]}) — skipped"
-    branches = [b for b in out.splitlines() if b]
+    branch_refs = {}
+    for line in out.splitlines():
+        if not line:
+            continue
+        name, sep, sha = line.partition("\t")
+        if sep and name and sha:
+            branch_refs[name] = sha
+    branches = list(branch_refs)
     open_heads = {pr["headRefName"] for pr in prs}
 
-    stale = []  # (branch, reason)
+    stale = []  # (branch, reason, observed ref SHA)
     for br in branches:
         if br == proj["trunk"] or br in open_heads:
             continue
@@ -385,19 +392,19 @@ def gather(proj):
                             "--state", "all", "--json", "state"], timeout=25)
         states = {p["state"] for p in (assoc or [])}
         if "MERGED" in states:
-            stale.append((br, "PR merged"))
+            stale.append((br, "PR merged", branch_refs[br]))
             continue
         if "CLOSED" in states:
-            stale.append((br, "PR closed unmerged"))
+            stale.append((br, "PR closed unmerged", branch_refs[br]))
             continue
         rc, ahead, _ = run(["gh", "api",
                             f"repos/{slug}/compare/{proj['trunk']}...{br}",
                             "--jq", ".ahead_by"], timeout=25)
         if rc == 0 and ahead == "0":
-            stale.append((br, "no unique commits"))
+            stale.append((br, "no unique commits", branch_refs[br]))
         else:
             n = ahead if rc == 0 else "?"
-            stale.append((br, f"NO PR, {n} unmerged commit(s) — deleting discards them"))
+            stale.append((br, f"NO PR, {n} unmerged commit(s) — deleting discards them", branch_refs[br]))
     return {"slug": slug, "prs": prs, "branches": branches, "stale": stale}, None
 
 
@@ -491,11 +498,13 @@ def desired_actions(proj, facts):
                     f"{proj['trunk']}{note}, then delete {pr['headRefName']}",
             "button": f"✅ Merge PR #{pr['number']}: {pr['title'][:28]}",
         }
-    for br, reason in facts["stale"]:
-        key = f"prune:{br}"
+    for br, reason, ref_sha in facts["stale"]:
+        # A prune approval is destructive; bind it to the exact observed ref so
+        # any subsequent push invalidates the stale button.
+        key = f"prune:{br}:{ref_sha}"
         warn = "⚠️ " if "unmerged commit" in reason else "\U0001f9f9 "
         out[key] = {
-            "kind": "prune", "branch": br, "reason": reason,
+            "kind": "prune", "branch": br, "reason": reason, "ref_sha": ref_sha,
             "desc": f"delete branch {br} ({reason})",
             "button": f"{warn}Delete {br[:34]} ({reason[:24]})",
         }
@@ -798,6 +807,12 @@ def execute(a, proj):
                             "--state", "open", "--json", "number"], timeout=25)
         if heads:
             return f"branch {br} is now head of open PR #{heads[0]['number']} — not deleting", False
+        ref, ref_err = gh_json(["api", f"repos/{slug}/git/ref/heads/{br}"], timeout=25)
+        current_sha = (ref or {}).get("object", {}).get("sha")
+        if not current_sha:
+            return f"cannot re-verify branch {br} ref ({ref_err or 'missing SHA'}) — not deleting", False
+        if current_sha != a.get("ref_sha"):
+            return f"branch {br} changed after approval ({a.get('ref_sha')} → {current_sha}) — run a fresh gate sweep", False
         rc, out, err = run(["gh", "api", "-X", "DELETE",
                             f"repos/{slug}/git/refs/heads/{br}"], timeout=25)
         if rc != 0:

@@ -14,7 +14,10 @@ mode = os.environ.get("FAKE_CHECK_MODE", "green")
 if args[:2] == ["repo", "view"]:
     print("owner/repo")
 elif args[:2] == ["pr", "list"]:
-    print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "baseRefOid": "base123", "mergeable": os.environ.get("FAKE_MERGEABLE", "MERGEABLE"), "mergeStateStatus": os.environ.get("FAKE_MERGE_STATE", "CLEAN"), "isDraft": False, "url": "https://example/pr/1"}]))
+    if "--head" in args:
+        print("[]")
+    else:
+        print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "baseRefOid": "base123", "mergeable": os.environ.get("FAKE_MERGEABLE", "MERGEABLE"), "mergeStateStatus": os.environ.get("FAKE_MERGE_STATE", "CLEAN"), "isDraft": False, "url": "https://example/pr/1"}]))
 elif args[:2] == ["pr", "checks"]:
     if mode == "no-ci": print("[]")
     elif mode == "missing": print(json.dumps([{"name":"tests","bucket":"pass"}]))
@@ -27,7 +30,9 @@ elif args and args[0] == "api" and "issues/1/comments" in " ".join(args):
     if review == "missing": print("[]")
     else: print(json.dumps([{"user":{"login":author}, "body":f"<!-- edge-review-gate sha=abc123 class=nontrivial verdict={review} ready={'yes' if review.startswith('pass') else 'no'} trust=model-reported -->"}]))
 elif args and args[0] == "api" and "branches?" in " ".join(args):
-    print("main\ncm/change")
+    print("main\\tbase123\ncm/change\\tabc123")
+elif args and args[0] == "api" and "git/ref/heads/" in " ".join(args):
+    print(json.dumps({"object":{"sha":os.environ.get("FAKE_REF_SHA", "abc123")}}))
 else:
     print("[]")
 '''
@@ -88,6 +93,36 @@ class PrGateTests(unittest.TestCase):
         result = self.run_gate("green", merge_state="BEHIND")
         self.assertIn("merge state BEHIND", result.stdout)
         self.assertNotIn("pending eg:", result.stdout)
+
+    def test_act_refuses_prune_when_branch_sha_changed_after_approval(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir = root / "bin"; bindir.mkdir()
+            gh = bindir / "gh"; gh.write_text(FAKE_GH); gh.chmod(0o755)
+            repo = root / "repo"; (repo / ".git").mkdir(parents=True)
+            cfg = root / "cfg"; cfg.mkdir()
+            project = cfg / "demo.env"
+            project.write_text(f"RDD_REPO_DIR={repo}\nRDD_MAIN_BRANCH=main\n")
+            state_dir = root / "state"; state_dir.mkdir()
+            state = {
+                "actions": {"deadbeef": {
+                    "key": "prune:cm/change:abc123", "label": "repo", "cfg": str(project),
+                    "repo": "owner/repo", "trunk": "main", "kind": "prune",
+                    "branch": "cm/change", "reason": "no unique commits", "ref_sha": "abc123",
+                    "status": "pending", "created": 1,
+                }},
+                "posts": {},
+            }
+            (state_dir / "state.json").write_text(json.dumps(state))
+            env = os.environ.copy()
+            env.update({"PATH": f"{bindir}:{env['PATH']}", "RDD_GATE_CONFIG_DIR": str(cfg),
+                        "RDD_GATE_STATE_DIR": str(state_dir), "FAKE_REF_SHA": "new456"})
+            result = subprocess.run([str(SCRIPT), "act", "eg:deadbeef"], env=env,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+            self.assertIn("changed after approval", result.stdout)
+            saved = json.loads((state_dir / "state.json").read_text())
+            self.assertEqual(saved["actions"]["deadbeef"]["status"], "failed")
 
 
 if __name__ == "__main__":

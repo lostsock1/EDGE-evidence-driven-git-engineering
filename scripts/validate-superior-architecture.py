@@ -105,10 +105,15 @@ def validate(
     if len(text.strip()) < 1500:
         blockers.append("Superior Architecture is too short to be a substantive synthesis")
 
-    # A sources declaration is not evidence by itself. Require concrete rows,
-    # then verify resolvable S-label / local-Markdown tokens named in frontmatter.
+    # A sources declaration is not evidence by itself. Scope parsing to the
+    # Sources-index section, require concrete rows, and resolve every declared
+    # local Markdown input under notes/. Hashes detect later evidence drift.
     sources = fm.get("sources", "")
-    source_rows = re.findall(r"^\|\s*(S?\d+)\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", text, re.M)
+    source_section_match = re.search(
+        r"^## Sources index\s*$\n(.*?)(?=^##\s|\Z)", text, re.M | re.S | re.I
+    )
+    source_section = source_section_match.group(1) if source_section_match else ""
+    source_rows = re.findall(r"^\|\s*(S?\d+)\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", source_section, re.M)
     if not source_rows:
         blockers.append("Sources index has no concrete source rows")
     source_index_text = "\n".join(f"{label} {entry}" for label, entry in source_rows)
@@ -116,6 +121,29 @@ def validate(
     unresolved = sorted(token for token in declared if token not in source_index_text)
     if unresolved:
         blockers.append("frontmatter sources missing from Sources index: " + ", ".join(unresolved))
+
+    hash_declarations = {
+        name: digest.lower()
+        for name, digest in re.findall(
+            r"([A-Za-z0-9_.-]+\.md)=([0-9a-fA-F]{64})",
+            fm.get("local_source_sha256", ""),
+        )
+    }
+    local_sources = sorted(token for token in declared if token.endswith(".md") and token != spec.name)
+    for name in local_sources:
+        source_path = notes / name
+        if not source_path.is_file():
+            blockers.append(f"declared local source does not exist under notes/: {name}")
+            continue
+        expected_source_hash = hash_declarations.get(name)
+        if not expected_source_hash:
+            blockers.append(f"local_source_sha256 missing binding for {name}")
+            continue
+        actual_source_hash = sha256_text(source_path.read_text(errors="replace"))
+        if expected_source_hash != actual_source_hash:
+            blockers.append(
+                f"local source changed after synthesis: {name} expected {expected_source_hash}, got {actual_source_hash}"
+            )
 
     versions = re.findall(r"^\|\s*v\d+(?:\.\d+)*\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|", text, re.M)
     if not versions:

@@ -15,11 +15,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Validate shell and Python syntax
         run: |
           bash -n scripts/*.sh github/protect-branch.sh install.sh uninstall.sh
           python3 -m py_compile scripts/*.py tests/*.py
       - name: Run regression suite
         run: python3 -m unittest discover -s tests -v
-      - name: Check whitespace
-        run: git diff --check
+      - name: Check whitespace in the submitted change
+        run: |
+          if [ -n "${{ github.base_ref }}" ]; then
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          else
+            git diff --check HEAD^...HEAD
+          fi
