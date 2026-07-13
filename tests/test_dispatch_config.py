@@ -50,10 +50,18 @@ class DispatchConfigTests(unittest.TestCase):
             fake = root / "opencode"
             fake.write_text(r'''#!/usr/bin/env bash
 if [[ "$*" == *"say hello"* ]]; then
-  printf '%s\n' '{"type":"text","text":"hello"}'
+  if [ "${FAKE_EMPTY_PROBE:-0}" = 1 ]; then
+    printf '%s\n' '{"type":"text","text":"   "}'
+  else
+    printf '%s\n' '{"type":"text","text":"hello"}'
+  fi
   exit 0
 fi
-printf '%s\n' '{"type":"text","text":"=== LOOP STATUS ===\nREVIEWER: Pass — fake\n=== END ==="}'
+if [ "${FAKE_EMPTY_TASK:-0}" = 1 ]; then
+  printf '%s\n' '{"type":"text","text":""}'
+else
+  printf '%s\n' '{"type":"text","text":"=== LOOP STATUS ===\nREVIEWER: Pass — fake\n=== END ==="}'
+fi
 exit 7
 ''')
             fake.chmod(0o755)
@@ -75,6 +83,40 @@ exit 7
         result = self.run_with_fake_opencode()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("all 1 model tiers failed", result.stderr)
+
+    def test_whitespace_only_probe_text_is_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = self.run_with_fake_opencode_extra(td, FAKE_EMPTY_PROBE="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("all 1 model tiers failed", result.stderr)
+
+    def test_empty_task_text_is_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = self.run_with_fake_opencode_extra(td, FAKE_EMPTY_TASK="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("all 1 model tiers failed", result.stderr)
+
+    def run_with_fake_opencode_extra(self, td, **extra):
+        # Reuse the fixture setup while injecting stream-shape controls.
+        # The temporary directory is intentionally retained for the subprocess.
+        root = Path(td)
+        home = root / "home"; home.mkdir()
+        repo = root / "repo"; subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        fake = root / "opencode"
+        fake.write_text('''#!/usr/bin/env bash
+if [[ "$*" == *"say hello"* ]]; then
+  if [ "${FAKE_EMPTY_PROBE:-0}" = 1 ]; then printf '%s\\n' '{"type":"text","text":"   "}'; else printf '%s\\n' '{"type":"text","text":"hello"}'; fi
+  exit 0
+fi
+if [ "${FAKE_EMPTY_TASK:-0}" = 1 ]; then printf '%s\\n' '{"type":"text","text":""}'; else printf '%s\\n' '{"type":"text","text":"ok"}'; fi
+exit 0
+''')
+        fake.chmod(0o755)
+        shared = root / "config.env"
+        shared.write_text(f'RDD_OPENCODE={fake}\nRDD_MODELS="fake/model"\nRDD_TIMEOUTS_BG="5"\nRDD_TIMEOUTS_FG="5"\nRDD_LOG={root}/run.log\nRDD_RUNS_DIR={root}/runs\nRDD_LOCKDIR={root}/locks\n')
+        project = root / "project.env"; project.write_text(f'RDD_REPO_DIR={repo}\n')
+        env = os.environ.copy(); env.update({"HOME": str(home), "RDD_SHARED_CONFIG": str(shared), "EDGE_RDD_CONFIG": str(project), **extra})
+        return subprocess.run([str(SCRIPT), "--fg", "test task"], env=env, text=True, capture_output=True)
 
     def test_project_file_cannot_override_shared_runtime_policy(self):
         result = self.run_with_fake_opencode('RDD_MODELS="evil/one evil/two"\nRDD_TIMEOUTS_FG="1 1"\n')

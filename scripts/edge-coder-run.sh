@@ -33,10 +33,11 @@
 # Failure = nonzero exit OR {"type":"error"} stream event OR no text produced.
 # A permission block or a normal completion is NOT a failure.
 #
-# PR FLOW (required once the trunk is branch-protected): the coder works on a
-# <prefix>/* branch and opens a PR to the trunk; direct pushes are rejected by
-# GitHub. The dispatch protocol (SUFFIX below) instructs this and the trailer
-# carries PR:.
+# PR FLOW (permissive completion): the coder should use a <prefix>/* branch and
+# open a PR to the trunk for committed implementation work; direct pushes to a
+# protected trunk are rejected by GitHub. Commitless/docs-only work may complete
+# without a PR. The wrapper reports model-reported state and missing PR/trailer
+# explicitly rather than inferring success.
 #
 # Reliability:
 #   - $HOME/.git guard: a stray git repo at $HOME makes opencode snapshot-walk
@@ -128,8 +129,8 @@ GATE_SCRIPT=${RDD_GATE_SCRIPT:-$HOME/.openclaw/shared-scripts/edge-pr-gate.sh}
 
 ts() { date +%Y-%m-%dT%H:%M:%S%z; }
 mkdir -p "$(dirname "$LOG")" "$RUNS_DIR" "$LOCKDIR"
-# Cleanup rotated stream logs older than 7 days
-find "$RUNS_DIR" -name "stream.log.old" -mtime +7 -delete 2>/dev/null || true
+# Per-run stream logs are immutable; never reuse a shared stream.log.
+find "$RUNS_DIR" -type f -name '*.stream.log' -mtime +7 -delete 2>/dev/null || true
 
 # ---- dependency preflight ---------------------------------------------------
 for c in flock setsid timeout git python3; do
@@ -356,10 +357,11 @@ run_dispatch() {
 1. BRANCH DISCIPLINE: {{MAIN}} is branch-protected — direct pushes to {{MAIN}}
    are rejected by GitHub. If HEAD is already on a {{PREFIX}}/* branch for this
    task, continue there; otherwise create {{PREFIX}}/<short-task-slug> from
-   {{MAIN}}. Commit there, push with git, and OPEN A PULL REQUEST to {{MAIN}}
-   using `gh pr create` — NEVER the github MCP write tools (they auto-reject
-   in this non-interactive dispatch and strand the run without a PR).
-   A human merges; never merge yourself.
+   {{MAIN}}. For committed implementation work, commit there, push with git,
+   and OPEN A PULL REQUEST to {{MAIN}} using `gh pr create` — NEVER the
+   github MCP write tools (they auto-reject in this non-interactive dispatch).
+   Commitless/docs-only work may have no PR. A human merges; never merge
+   yourself. Report actual model state; do not claim a PR exists if none was found.
 2. Write code and tests. Run targeted local validation when it is feasible and
    safe (the smallest relevant test/lint/type-check); CI remains authoritative
    for the full required suite. If local validation is infeasible, say why.
@@ -454,7 +456,7 @@ for line in sys.stdin:
         t = e.get("text") or e.get("part", {}).get("text")
         if t:
             texts.append(t)
-if not has_text:
+if not has_text or not "".join(texts).strip():
     sys.exit(1)
 print("".join(texts))
 ')"
@@ -474,11 +476,9 @@ print("".join(texts))
     # every hard-timeout into "empty-or-error-output" in the ledger.
     ERRTMP="$(mktemp /tmp/edge-coder-stderr.XXXXXX)"
     OCRC="$(mktemp /tmp/edge-coder-rc.XXXXXX)"
-    STREAM_LOG="$RUNS_DIR/stream.log"
-    # Rotate if over 10MB
-    if [ -f "$STREAM_LOG" ] && [ "$(stat -c%s "$STREAM_LOG" 2>/dev/null || echo 0)" -gt 10485760 ]; then
-      mv "$STREAM_LOG" "$STREAM_LOG.old" 2>/dev/null || true
-    fi
+    # Immutable per-run stream capture; RUN_ID is unique for async runs and
+    # $$ disambiguates foreground runs. Never append to a shared stream.log.
+    STREAM_LOG="$RUNS_DIR/${RUN_ID:-fg-$$}.stream.log"
     OUT="$( { cd "$DIR" && \
       timeout --signal=TERM --kill-after=30 "$WORK_TO" \
       "$OPENCODE" run --format json --model "$M" "${VARIANT_ARGS[@]}" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}"; echo $? >"$OCRC"; } 2>>"$ERRTMP" | \
@@ -506,7 +506,7 @@ for line in sys.stdin:
         t = e.get("text") or e.get("part", {}).get("text")
         if t:
             texts.append(t)
-if has_error or not has_text:
+if has_error or not has_text or not "".join(texts).strip():
     sys.exit(1)
 print("".join(texts))
 ')"
@@ -594,11 +594,15 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   echo "variant: ${USED_VARIANT:-default}"
   [ -n "$FAIL_SUMMARY" ] && echo "fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
   echo "branch: $branch"
-  echo "trailer: $TRAILER_OK"
-  echo "reviewer verdict: $REVIEWER_VERDICT${REVIEWER_DETAIL:+ — $REVIEWER_DETAIL}"
-  echo "review trust limit: model-reported trailer parsed mechanically; the wrapper cannot prove an independent reviewer actually ran"
+  echo "trailer: $TRAILER_OK (model-reported; parsed mechanically)"
+  echo "reviewer verdict: $REVIEWER_VERDICT${REVIEWER_DETAIL:+ — $REVIEWER_DETAIL} (model-reported only)"
+  echo "review trust limit: the wrapper cannot prove an independent reviewer actually ran"
   echo "gate readiness: $([ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; } && echo eligible-for-CI-gate || echo BLOCKED-by-review)"
-  echo "PR: ${pr_url:-none found for head branch}"
+  if [ -n "$pr_url" ]; then
+    echo "PR: $pr_url (observed open PR for head branch)"
+  else
+    echo "PR: MISSING (no open PR observed for head branch; model-reported completion may still be commitless/docs-only)"
+  fi
   echo "new commits:"
   printf '%s\n' "$commits"
 
@@ -651,8 +655,9 @@ fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
     msg="$msg
 branch: $branch
 PR: ${pr_url:-none}
-trailer: $TRAILER_OK
-reviewer: $REVIEWER_VERDICT (model-reported; wrapper cannot prove reviewer execution)
+trailer: $TRAILER_OK (model-reported; parsed mechanically)
+reviewer: $REVIEWER_VERDICT (model-reported only; wrapper cannot prove reviewer execution)
+PR state: $([ -n "$pr_url" ] && echo "observed open PR" || echo "MISSING — no open PR observed; this is not a claim that model work failed")
 gate readiness: $([ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; } && echo eligible-for-CI-gate || echo BLOCKED-by-review)
 commits:
 ${commits}"

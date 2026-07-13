@@ -36,8 +36,9 @@ def parse_frontmatter(text: str) -> dict[str, str]:
     return values
 
 
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
+def sha256_bytes(path: Path) -> str:
+    """Hash exact filesystem bytes; decoding/re-encoding changes bindings."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def spec_status(text: str) -> tuple[bool, bool, str]:
@@ -64,11 +65,12 @@ def spec_status(text: str) -> tuple[bool, bool, str]:
 
 
 def validate(
-    workspace: Path, slug: str, max_age_days: int
+    workspace: Path, slug: str, max_age_days: int,
+    north_star_path: Path | None = None, architecture_path: Path | None = None,
 ) -> tuple[list[str], list[str], Path, Path, bool, bool]:
     notes = workspace / "projects" / slug / "notes"
-    spec = notes / f"{slug}-north-star.md"
-    arch = notes / "SUPERIOR_ARCHITECTURE.md"
+    spec = north_star_path or (notes / f"{slug}-north-star.md")
+    arch = architecture_path or (notes / "SUPERIOR_ARCHITECTURE.md")
     blockers: list[str] = []
     warnings: list[str] = []
 
@@ -144,7 +146,7 @@ def validate(
         if not expected_source_hash:
             blockers.append(f"local_source_sha256 missing binding for {name}")
             continue
-        actual_source_hash = sha256_text(source_path.read_text(errors="replace"))
+        actual_source_hash = sha256_bytes(source_path)
         if expected_source_hash != actual_source_hash:
             blockers.append(
                 f"local source changed after synthesis: {name} expected {expected_source_hash}, got {actual_source_hash}"
@@ -173,7 +175,7 @@ def validate(
     if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
         blockers.append("frontmatter north_star_sha256 must bind the exact north-star spec bytes")
     elif spec_text:
-        actual_hash = sha256_text(spec_text)
+        actual_hash = sha256_bytes(spec)
         if expected_hash != actual_hash:
             blockers.append(
                 "north-star spec changed after synthesis: expected sha256 "
@@ -189,9 +191,18 @@ def main() -> int:
     parser.add_argument("--project", required=True)
     parser.add_argument("--max-age-days", type=int, default=45)
     parser.add_argument("--heartbeat", action="store_true", help="emit a safe model-synthesis instruction when appropriate")
+    parser.add_argument("--north-star-path", type=Path,
+                        help="optional existing north-star artifact path (relative to current directory)")
+    parser.add_argument("--architecture-path", type=Path,
+                        help="optional existing Superior Architecture artifact path (relative to current directory)")
     args = parser.parse_args()
+    # CLI overrides are ordinary filesystem paths: make relative paths explicit
+    # against the invoking directory, without creating or rewriting artifacts.
+    north_star_path = args.north_star_path.resolve() if args.north_star_path else None
+    architecture_path = args.architecture_path.resolve() if args.architecture_path else None
     blockers, warnings, spec, arch, spec_valid, spec_authorized = validate(
-        args.workspace, args.project, args.max_age_days
+        args.workspace, args.project, args.max_age_days,
+        north_star_path, architecture_path,
     )
     for warning in warnings:
         print(f"WARNING: {warning}")

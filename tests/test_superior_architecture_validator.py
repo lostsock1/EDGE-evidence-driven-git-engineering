@@ -162,6 +162,19 @@ class SuperiorArchitectureValidatorTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("updated is in the future", result.stdout)
 
+    def test_optional_artifact_overrides_validate_existing_files(self):
+        spec = valid_spec()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            north = root / "operator-north-star.md"; north.write_bytes(spec.encode())
+            arch = root / "existing-architecture.md"; arch.write_text(architecture_for(spec))
+            result = subprocess.run([
+                str(SCRIPT), "--workspace", str(root), "--project", "demo",
+                "--north-star-path", str(north), "--architecture-path", str(arch),
+            ], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(str(arch), result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

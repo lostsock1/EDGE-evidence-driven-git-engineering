@@ -12,12 +12,16 @@ import json, os, sys
 args = sys.argv[1:]
 mode = os.environ.get("FAKE_CHECK_MODE", "green")
 if args[:2] == ["repo", "view"]:
-    print("owner/repo")
+    print(os.environ.get("FAKE_SLUG", "owner/repo"))
 elif args[:2] == ["pr", "list"]:
     if "--head" in args:
-        print("[]")
+        state = os.environ.get("FAKE_ASSOC_STATE", "none")
+        print(json.dumps([] if state == "none" else [{"state": state}]))
     else:
-        print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "baseRefOid": "base123", "mergeable": os.environ.get("FAKE_MERGEABLE", "MERGEABLE"), "mergeStateStatus": os.environ.get("FAKE_MERGE_STATE", "CLEAN"), "isDraft": False, "url": "https://example/pr/1"}]))
+        if os.environ.get("FAKE_OPEN_PRS") == "none":
+            print("[]")
+        else:
+            print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "baseRefOid": "base123", "mergeable": os.environ.get("FAKE_MERGEABLE", "MERGEABLE"), "mergeStateStatus": os.environ.get("FAKE_MERGE_STATE", "CLEAN"), "isDraft": False, "url": "https://example/pr/1"}]))
 elif args[:2] == ["pr", "checks"]:
     if mode == "no-ci": print("[]")
     elif mode == "missing": print(json.dumps([{"name":"tests","bucket":"pass"}]))
@@ -30,7 +34,12 @@ elif args and args[0] == "api" and "issues/1/comments" in " ".join(args):
     if review == "missing": print("[]")
     else: print(json.dumps([{"user":{"login":author}, "body":f"<!-- edge-review-gate sha=abc123 class=nontrivial verdict={review} ready={'yes' if review.startswith('pass') else 'no'} trust=model-reported -->"}]))
 elif args and args[0] == "api" and "branches?" in " ".join(args):
-    print("main\\tbase123\ncm/change\\tabc123")
+    print(os.environ.get("FAKE_BRANCHES", "main\tbase123\ncm/change\tabc123"))
+elif args and args[0] == "api" and "/compare/" in " ".join(args):
+    compare = os.environ.get("FAKE_COMPARE", "")
+    if compare == "FAIL":
+        sys.exit(1)
+    print(compare)
 elif args and args[0] == "api" and "git/ref/heads/" in " ".join(args):
     print(json.dumps({"object":{"sha":os.environ.get("FAKE_REF_SHA", "abc123")}}))
 else:
@@ -39,7 +48,7 @@ else:
 
 
 class PrGateTests(unittest.TestCase):
-    def run_gate(self, mode, review="pass", base="main", author="trusted-bot", merge_state="CLEAN"):
+    def run_gate(self, mode, review="pass", base="main", author="trusted-bot", merge_state="CLEAN", **extra):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bindir = root / "bin"; bindir.mkdir()
@@ -52,7 +61,7 @@ class PrGateTests(unittest.TestCase):
             env.update({"PATH": f"{bindir}:{env['PATH']}", "RDD_GATE_CONFIG_DIR": str(cfg),
                         "RDD_GATE_STATE_DIR": str(root / "state"), "FAKE_CHECK_MODE": mode,
                         "FAKE_REVIEW": review, "FAKE_BASE": base, "FAKE_REVIEW_AUTHOR": author,
-                        "FAKE_MERGE_STATE": merge_state})
+                        "FAKE_MERGE_STATE": merge_state, **extra})
             return subprocess.run([str(SCRIPT), "sweep", "--dry-run"], env=env, text=True, capture_output=True)
 
     def test_all_named_required_checks_must_be_present(self):
@@ -93,6 +102,39 @@ class PrGateTests(unittest.TestCase):
         result = self.run_gate("green", merge_state="BEHIND")
         self.assertIn("merge state BEHIND", result.stdout)
         self.assertNotIn("pending eg:", result.stdout)
+
+    def test_compare_failure_does_not_mint_normal_prune(self):
+        result = self.run_gate("green", FAKE_BRANCHES="main\tbase123\nold\tdeadbeef", FAKE_COMPARE="FAIL", FAKE_OPEN_PRS="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pending eg:", result.stdout)
+
+    def test_orphan_ahead_by_does_not_mint_normal_prune(self):
+        result = self.run_gate("green", FAKE_BRANCHES="main\tbase123\nold\tdeadbeef", FAKE_COMPARE="2", FAKE_OPEN_PRS="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pending eg:", result.stdout)
+
+    def test_closed_unmerged_branch_mints_explicit_destructive_kind(self):
+        result = self.run_gate("green", FAKE_BRANCHES="main\tbase123\nold\tdeadbeef",
+                               FAKE_ASSOC_STATE="CLOSED", FAKE_OPEN_PRS="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DESTRUCTIVE delete closed-unmerged branch old", result.stdout)
+        self.assertIn("DESTRUCTIVE delete closed-unmerged branch old", result.stdout)
+
+    def test_duplicate_canonical_repositories_are_rejected_before_actions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); bindir = root / "bin"; bindir.mkdir()
+            gh = bindir / "gh"; gh.write_text(FAKE_GH); gh.chmod(0o755)
+            cfg = root / "cfg"; cfg.mkdir()
+            for name in ("a.env", "b.env"):
+                repo = root / name.removesuffix(".env"); (repo / ".git").mkdir(parents=True)
+                (cfg / name).write_text(f"RDD_REPO_DIR={repo}\nRDD_MAIN_BRANCH=main\n")
+            env = os.environ.copy(); env.update({"PATH": f"{bindir}:{env['PATH']}",
+                "RDD_GATE_CONFIG_DIR": str(cfg), "RDD_GATE_STATE_DIR": str(root / "state")})
+            result = subprocess.run([str(SCRIPT), "sweep", "--dry-run"], env=env,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("duplicate canonical GitHub repo owner/repo", result.stdout)
+            self.assertNotIn("pending eg:", result.stdout)
 
     def test_act_refuses_prune_when_branch_sha_changed_after_approval(self):
         with tempfile.TemporaryDirectory() as td:

@@ -52,6 +52,21 @@ class InstallSmokeTests(unittest.TestCase):
             )
             self.assertEqual(loaded.stdout, str(checkout))
 
+    def test_kickoff_resolves_shared_default_project_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); home = root / "home"; home.mkdir()
+            config_dir = home / ".config" / "edge-rdd"; config_dir.mkdir(parents=True)
+            project = root / "project.env"
+            project.write_text("RDD_REPO_SLUG=owner/demo\nRDD_REPO_DIR=/missing\n")
+            shared = config_dir / "config.env"
+            shared.write_text(f"RDD_DEFAULT_PROJECT_CONFIG={project}\n")
+            result = subprocess.run(["bash", str(ROOT / "scripts/kickoff.sh"), "--dry-run"],
+                                    env={**os.environ, "HOME": str(home)},
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"config: {project}", result.stdout)
+            self.assertNotIn("config: " + str(shared), result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

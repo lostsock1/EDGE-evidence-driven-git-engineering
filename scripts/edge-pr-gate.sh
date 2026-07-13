@@ -159,6 +159,7 @@ def projects():
             continue
         out.append({
             "cfg": str(f),
+            # Display label is separate from canonical GitHub identity.
             "label": Path(repo_dir).name,
             "repo_dir": repo_dir,
             "trunk": env.get("RDD_MAIN_BRANCH", "main"),
@@ -283,7 +284,8 @@ def send_message(dest, text, buttons=None, dry=False):
 def repo_slug(proj):
     rc, out, err = run(["gh", "repo", "view", "--json", "nameWithOwner",
                         "--jq", ".nameWithOwner"], cwd=proj["repo_dir"], timeout=25)
-    return (out, None) if rc == 0 and out else (None, err or "no slug")
+    slug = out.strip()
+    return (slug, None) if rc == 0 and slug else (None, err or "no slug")
 
 
 def pr_checks_verdict(slug, number, required):
@@ -384,7 +386,9 @@ def gather(proj):
     branches = list(branch_refs)
     open_heads = {pr["headRefName"] for pr in prs}
 
-    stale = []  # (branch, reason, observed ref SHA)
+    # Entries are (branch, reason, observed ref SHA, action kind). Compare
+    # failures are unavailable evidence and never mint a normal prune.
+    stale = []
     for br in branches:
         if br == proj["trunk"] or br in open_heads:
             continue
@@ -392,19 +396,29 @@ def gather(proj):
                             "--state", "all", "--json", "state"], timeout=25)
         states = {p["state"] for p in (assoc or [])}
         if "MERGED" in states:
-            stale.append((br, "PR merged", branch_refs[br]))
+            # Normal prune is offered only with successful compare evidence that
+            # the branch has no commits ahead of trunk.
+            rc, ahead, _ = run(["gh", "api",
+                                f"repos/{slug}/compare/{proj['trunk']}...{br}",
+                                "--jq", ".ahead_by"], timeout=25)
+            if rc == 0 and ahead == "0":
+                stale.append((br, "PR merged", branch_refs[br], "prune"))
+            else:
+                log(f"COMPARE UNAVAILABLE/NONZERO {slug} {proj['trunk']}...{br} — no prune action minted")
             continue
         if "CLOSED" in states:
-            stale.append((br, "PR closed unmerged", branch_refs[br]))
+            stale.append((br, "PR closed unmerged — DELETING THIS BRANCH IS DESTRUCTIVE", branch_refs[br], "delete-closed-unmerged"))
             continue
         rc, ahead, _ = run(["gh", "api",
                             f"repos/{slug}/compare/{proj['trunk']}...{br}",
                             "--jq", ".ahead_by"], timeout=25)
-        if rc == 0 and ahead == "0":
-            stale.append((br, "no unique commits", branch_refs[br]))
+        if rc != 0 or not re.fullmatch(r"\d+", ahead or ""):
+            log(f"COMPARE UNAVAILABLE {slug} {proj['trunk']}...{br} — no prune action minted")
+            continue
+        if ahead == "0":
+            stale.append((br, "no unique commits", branch_refs[br], "prune"))
         else:
-            n = ahead if rc == 0 else "?"
-            stale.append((br, f"NO PR, {n} unmerged commit(s) — deleting discards them", branch_refs[br]))
+            log(f"ORPHAN AHEAD {slug} {proj['trunk']}...{br} ahead_by={ahead} — no prune action minted")
     return {"slug": slug, "prs": prs, "branches": branches, "stale": stale}, None
 
 
@@ -418,7 +432,10 @@ def ack_text(a):
         return (f"⏳ On it — merging PR #{a['pr']} into {a['trunk']} and cleaning up "
                 f"{a['branch']}. I'll confirm in a moment.")
     if k == "prune":
-        return f"⏳ On it — deleting branch {a['branch']}. Confirming shortly."
+        return f"⏳ On it — deleting stale branch {a['branch']}. Confirming shortly."
+    if k == "delete-closed-unmerged":
+        return (f"⏳ On it — re-verifying the DESTRUCTIVE closed-unmerged deletion of "
+                f"{a['branch']}. Confirming shortly.")
     if k == "batch":
         return (f"⏳ On it — running every approved item for {a['label']} now; "
                 f"I'll post the result when they finish.")
@@ -451,8 +468,15 @@ def action_explainer(a):
             f"a stale approval.\n"
             f"   Link: {a['url']}"
         )
-    if a["kind"] == "prune":
+    if a["kind"] in ("prune", "delete-closed-unmerged"):
         reason = a.get("reason", "")
+        if a["kind"] == "delete-closed-unmerged":
+            return (
+                f"▸ DESTRUCTIVE DELETE — closed-unmerged branch {a['branch']}\n"
+                f"   CONFIRMATION REQUIRED: this permanently deletes {a['branch']} even though its PR was closed without merging.\n"
+                f"   Consequence: commits not in {trunk} may be lost permanently. Approve only if you explicitly intend to discard this work.\n"
+                f"   Why it's offered: {reason}. I will reverify the closed-unmerged PR state and exact branch ref at execution time."
+            )
         if "unmerged commit" in reason:
             conseq = (
                 f"this branch has commits that are NOT in {trunk}. Deleting it "
@@ -498,16 +522,22 @@ def desired_actions(proj, facts):
                     f"{proj['trunk']}{note}, then delete {pr['headRefName']}",
             "button": f"✅ Merge PR #{pr['number']}: {pr['title'][:28]}",
         }
-    for br, reason, ref_sha in facts["stale"]:
-        # A prune approval is destructive; bind it to the exact observed ref so
-        # any subsequent push invalidates the stale button.
-        key = f"prune:{br}:{ref_sha}"
-        warn = "⚠️ " if "unmerged commit" in reason else "\U0001f9f9 "
-        out[key] = {
-            "kind": "prune", "branch": br, "reason": reason, "ref_sha": ref_sha,
-            "desc": f"delete branch {br} ({reason})",
-            "button": f"{warn}Delete {br[:34]} ({reason[:24]})",
-        }
+    for item in facts["stale"]:
+        br, reason, ref_sha, kind = item if len(item) == 4 else (*item, "prune")
+        key = f"{kind}:{br}:{ref_sha}"
+        if kind == "delete-closed-unmerged":
+            out[key] = {
+                "kind": kind, "branch": br, "reason": reason, "ref_sha": ref_sha,
+                "desc": f"DESTRUCTIVE delete closed-unmerged branch {br}",
+                "button": f"🛑 CONFIRM DELETE {br[:30]} (closed-unmerged)",
+            }
+        else:
+            warn = "⚠️ " if "unmerged commit" in reason else "\U0001f9f9 "
+            out[key] = {
+                "kind": kind, "branch": br, "reason": reason, "ref_sha": ref_sha,
+                "desc": f"delete branch {br} ({reason})",
+                "button": f"{warn}Delete {br[:34]} ({reason[:24]})",
+            }
     return out
 
 
@@ -515,9 +545,29 @@ def sweep(dry=False):
     now = time.time()
     all_clean = True
     dest = hub_dest()
+    configured = projects()
+    # Resolve and reject duplicate canonical repositories before touching state
+    # or minting any actions. Sorting projects() makes the winner/rejection
+    # deterministic across runs.
+    canonical_by_repo = {}
+    duplicate_cfgs = set()
+    for proj in configured:
+        slug, err = repo_slug(proj)
+        if slug:
+            key = slug.strip().lower()
+            canonical_by_repo.setdefault(key, []).append(proj["cfg"])
+    for key, cfgs in canonical_by_repo.items():
+        if len(cfgs) > 1:
+            duplicate_cfgs.update(cfgs)
     with Locked():
         state = load_state()
-        for proj in projects():
+        for proj in configured:
+            if proj["cfg"] in duplicate_cfgs:
+                slug = next((s for s, cfgs in canonical_by_repo.items() if proj["cfg"] in cfgs), "unknown")
+                print(f"project {proj['label']} (cfg {Path(proj['cfg']).name}, trunk {proj['trunk']})")
+                print(f"  !! duplicate canonical GitHub repo {slug} — refusing ambiguous project state")
+                all_clean = False
+                continue
             label = proj["label"]
             print(f"project {label} (cfg {Path(proj['cfg']).name}, trunk {proj['trunk']})")
             facts, err = gather(proj)
@@ -525,6 +575,7 @@ def sweep(dry=False):
                 print(f"  !! {err}")
                 all_clean = False
                 continue
+            project_key = facts["slug"].strip().lower()
 
             # info lines
             red = [p for p in facts["prs"] if p["verdict"] == "red"]
@@ -552,7 +603,7 @@ def sweep(dry=False):
 
             # reconcile pending actions for this project
             existing = {a["key"]: (aid, a) for aid, a in state["actions"].items()
-                        if a["label"] == label and a["status"] == "pending"}
+                        if a.get("project_key", a.get("repo", "").lower()) == project_key and a["status"] == "pending"}
             for key, (aid, a) in existing.items():
                 if key not in desired:
                     a["status"] = "superseded"
@@ -563,7 +614,7 @@ def sweep(dry=False):
                     actions.append((existing[key][0], existing[key][1]))
                     continue
                 aid = secrets.token_hex(6)
-                a = {"key": key, "label": label, "cfg": proj["cfg"],
+                a = {"key": key, "label": label, "project_key": project_key, "cfg": proj["cfg"],
                      "repo": facts["slug"], "trunk": proj["trunk"],
                      "status": "pending", "created": now, **tpl}
                 state["actions"][aid] = a
@@ -575,12 +626,12 @@ def sweep(dry=False):
                     print("  no approvals needed (CI/reviewer-blocked PRs ride the coder loop)")
                 else:
                     print("  clean ✓ (trunk-only or only active PR work)")
-                state["posts"].setdefault(label, {})["fingerprint"] = ""
+                state["posts"].setdefault(project_key, {})["fingerprint"] = ""
                 continue
 
             all_clean = False
             fp = hashlib.sha1(json.dumps(sorted(desired.keys())).encode()).hexdigest()
-            post = state["posts"].get(label, {})
+            post = state["posts"].get(project_key, {})
             fresh = post.get("fingerprint") != fp
             aged = now - post.get("ts", 0) >= REASK_HOURS * 3600
             snoozed = now < post.get("snoozed_until", 0)
@@ -648,14 +699,15 @@ def sweep(dry=False):
             # Supersede any prior pending batch/snooze for this project — a new ask
             # replaces them so a stale "do all" can't fire against old state.
             for sid, sa in state["actions"].items():
-                if (sa["label"] == label and sa["status"] == "pending"
+                if (sa.get("project_key", sa.get("repo", "").lower()) == project_key
+                        and sa["status"] == "pending"
                         and sa["kind"] in ("snooze", "batch")):
                     sa["status"] = "superseded"
                     sa["result"] = "newer gate ask posted"
             if do_all:
                 batch_id = secrets.token_hex(6)
                 state["actions"][batch_id] = {
-                    "key": f"batch:{int(now)}", "label": label, "cfg": proj["cfg"],
+                    "key": f"batch:{int(now)}", "label": label, "project_key": project_key, "cfg": proj["cfg"],
                     "repo": facts["slug"], "trunk": proj["trunk"], "kind": "batch",
                     "desc": f"do all {len(actions)} pending action(s) for {label}",
                     "button": f"☑️ Do all {len(actions)} of the above",
@@ -664,7 +716,7 @@ def sweep(dry=False):
                 buttons.append((f"☑️ Do all {len(actions)} of the above", f"/gate act eg:{batch_id}"))
             snooze_id = secrets.token_hex(6)
             state["actions"][snooze_id] = {
-                "key": f"snooze:{int(now)}", "label": label, "cfg": proj["cfg"],
+                "key": f"snooze:{int(now)}", "label": label, "project_key": project_key, "cfg": proj["cfg"],
                 "repo": facts["slug"], "trunk": proj["trunk"], "kind": "snooze",
                 "desc": f"snooze {label} gate asks for {REASK_HOURS:.0f}h",
                 "button": "⏸ Not now (snooze 24h)",
@@ -673,7 +725,7 @@ def sweep(dry=False):
             buttons.append((f"⏸ Not now (snooze {REASK_HOURS:.0f}h)", f"/gate act eg:{snooze_id}"))
             ok = send_message(dest, "\n".join(lines), buttons, dry=dry)
             if ok and not dry:
-                state["posts"][label] = {"fingerprint": fp, "ts": now,
+                state["posts"][project_key] = {"fingerprint": fp, "ts": now,
                                          "snoozed_until": post.get("snoozed_until", 0)}
                 print(f"  posted approval message ({len(buttons)} buttons) to gate hub "
                       f"{dest['channel']} thread {dest['thread'] or '-'}")
@@ -688,10 +740,17 @@ def sweep(dry=False):
 # ---- act ------------------------------------------------------------------------
 
 def find_proj(action):
+    # State predating project_key is supported via the canonical repo slug. Do
+    # not use display labels/basenames: two projects may share one basename.
+    wanted = action.get("project_key") or action.get("repo", "").strip().lower()
+    if not wanted:
+        return None
+    matches = []
     for p in projects():
-        if p["cfg"] == action["cfg"] or p["label"] == action["label"]:
-            return p
-    return None
+        slug, _ = repo_slug(p)
+        if slug and slug.strip().lower() == wanted:
+            matches.append(p)
+    return matches[0] if len(matches) == 1 else None
 
 
 def act(aid):
@@ -728,8 +787,9 @@ def act(aid):
             # goes through execute()'s own re-verification independently, so a
             # PR that went red since the ask is skipped, not force-merged.
             siblings = [(sid, sa) for sid, sa in state["actions"].items()
-                        if sa["label"] == a["label"] and sa["status"] == "pending"
-                        and sa["kind"] in ("merge", "prune")]
+                        if sa.get("project_key", sa.get("repo", "").lower()) == a.get("project_key", a.get("repo", "").lower())
+                        and sa["status"] == "pending"
+                        and sa["kind"] in ("merge", "prune", "delete-closed-unmerged")]
             siblings.sort(key=lambda r: r[1]["created"])
             if not siblings:
                 outcome, ok = f"{a['label']}: nothing left to do (all items already handled)", True
@@ -752,7 +812,8 @@ def act(aid):
         a["result"] = outcome
         a["acted"] = time.time()
         if a["kind"] == "snooze" and ok:
-            state["posts"].setdefault(a["label"], {})["snoozed_until"] = \
+            post_key = a.get("project_key") or a.get("repo", "").strip().lower()
+            state["posts"].setdefault(post_key, {})["snoozed_until"] = \
                 time.time() + REASK_HOURS * 3600
         save_state(state)
     log(f"ACT eg:{aid} {a['kind']} {a['label']} -> {a['status']}: {outcome[:160]}")
@@ -799,7 +860,7 @@ def execute(a, proj):
         return (f"{a['label']}: merged PR #{a['pr']} “{pr['title'][:48]}” into "
                 f"{trunk} ({MERGE_METHOD}) and deleted {pr['headRefName']} — {pr['url']}"), True
 
-    if a["kind"] == "prune":
+    if a["kind"] in ("prune", "delete-closed-unmerged"):
         br = a["branch"]
         if br == trunk:
             return f"refusing to delete trunk {trunk}", False
@@ -807,12 +868,29 @@ def execute(a, proj):
                             "--state", "open", "--json", "number"], timeout=25)
         if heads:
             return f"branch {br} is now head of open PR #{heads[0]['number']} — not deleting", False
+        if a["kind"] == "delete-closed-unmerged":
+            closed, closed_err = gh_json(["pr", "list", "-R", slug, "--head", br,
+                                          "--state", "all", "--json", "state"], timeout=25)
+            if closed is None or not any(p.get("state") == "CLOSED" for p in closed) \
+                    or any(p.get("state") == "MERGED" for p in closed):
+                return f"branch {br} is no longer verified as closed-unmerged ({closed_err or 'state changed'}) — not deleting", False
         ref, ref_err = gh_json(["api", f"repos/{slug}/git/ref/heads/{br}"], timeout=25)
         current_sha = (ref or {}).get("object", {}).get("sha")
         if not current_sha:
             return f"cannot re-verify branch {br} ref ({ref_err or 'missing SHA'}) — not deleting", False
         if current_sha != a.get("ref_sha"):
             return f"branch {br} changed after approval ({a.get('ref_sha')} → {current_sha}) — run a fresh gate sweep", False
+        # Compare/ref/PR state is reverified at act. Unavailable or malformed
+        # compare output is refusal, never evidence for deletion.
+        rc_cmp, ahead_cmp, err_cmp = run(["gh", "api",
+                                          f"repos/{slug}/compare/{trunk}...{br}",
+                                          "--jq", ".ahead_by"], timeout=25)
+        if rc_cmp != 0 or not re.fullmatch(r"\d+", ahead_cmp or ""):
+            return f"cannot re-verify compare for {br} ({err_cmp or 'malformed response'}) — not deleting", False
+        if a["kind"] == "prune":
+            was_unique = "unmerged commit" in a.get("reason", "")
+            if (was_unique and ahead_cmp == "0") or (not was_unique and ahead_cmp != "0"):
+                return f"branch {br} compare state changed (ahead_by={ahead_cmp}) — run a fresh gate sweep", False
         rc, out, err = run(["gh", "api", "-X", "DELETE",
                             f"repos/{slug}/git/refs/heads/{br}"], timeout=25)
         if rc != 0:
@@ -838,7 +916,8 @@ def sync_local(proj):
 def _pending(state, label=None):
     rows = [(aid, a) for aid, a in state["actions"].items()
             if a["status"] == "pending" and a["kind"] not in ("snooze", "batch")
-            and (label is None or a["label"].lower() == label.lower())]
+            and (label is None or a["label"].lower() == label.lower()
+                 or a.get("project_key", a.get("repo", "").lower()) == label.lower())]
     if not rows:
         print("no pending actions" + (f" for {label}" if label else ""))
         return

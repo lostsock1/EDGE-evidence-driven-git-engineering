@@ -113,7 +113,7 @@ Then, minutes later, the wrapper reports CI plus reviewer eligibility. The gate 
 | Completion shows `trailer: MISSING`, `PR: none`, no commits | run beheaded mid-task — most often an `ask` permission auto-rejecting in non-interactive mode | grep the run log for `auto-rejecting`; flip that permission to `allow` (safety lives in branch protection) or to `deny` if it truly must not happen |
 | Wrapper refuses: `$HOME/.git exists` | stray git repo at home dir | `rm -rf $HOME/.git` (verify it's stray first!) |
 | All tiers `rate-limited`/`quota` | provider account issue | fix billing/keys; the failure message names each tier's reason |
-| Coder "succeeded" but pushed nothing | it committed on the wrong branch or left work uncommitted | the completion message says exactly that; re-dispatch — the partial-work handoff tells the next run to continue, not restart |
+| Coder "succeeded" but pushed nothing | it committed on the wrong branch or left work uncommitted | the completion message distinguishes model-reported state from observed state and explicitly says PR MISSING; commitless/docs-only work may be intentional — inspect the run and partial-work handoff before re-dispatching |
 | PR blocked on a check that never runs | required context name ≠ CI job name (renamed job?) | fix the name in ci.yml or re-run `github/protect-branch.sh` with the new contexts |
 | CI never triggers | workflow `branches:` filter points at an old/renamed trunk | update `on.push/pull_request.branches` |
 | Agent's model failover stopped working | user-pinned session model disables the fallback chain | remove `modelOverride*` from the agent's `sessions.json` with the gateway stopped |
