@@ -21,13 +21,43 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-CONFIG="${EDGE_RDD_CONFIG:-$HOME/.config/edge-rdd/config.env}"
-if [ ! -f "$CONFIG" ]; then
-  echo "kickoff: config not found: $CONFIG — run install.sh --apply first (or set EDGE_RDD_CONFIG)" >&2
-  exit 2
+# Explicit config wins. Without it, source the shared config first so the
+# installer-generated RDD_DEFAULT_PROJECT_CONFIG pointer is available, then
+# source that selected project config. Expand only a leading ~/ safely (never
+# rewrite embedded tildes).
+expand_leading_tilde() {
+  case "$1" in
+    ~) printf '%s' "$HOME" ;;
+    ~/*) printf '%s/%s' "$HOME" "${1#~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+if [ -n "${EDGE_RDD_CONFIG:-}" ]; then
+  CONFIG="$(expand_leading_tilde "$EDGE_RDD_CONFIG")"
+  if [ ! -f "$CONFIG" ]; then
+    echo "kickoff: config not found: $CONFIG — run install.sh --apply first (or set EDGE_RDD_CONFIG)" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+else
+  SHARED_CONFIG="$(expand_leading_tilde "${RDD_SHARED_CONFIG:-$HOME/.config/edge-rdd/config.env}")"
+  if [ ! -f "$SHARED_CONFIG" ]; then
+    echo "kickoff: shared config not found: $SHARED_CONFIG — run install.sh --apply first (or set EDGE_RDD_CONFIG)" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  . "$SHARED_CONFIG"
+  CONFIG="$(expand_leading_tilde "${RDD_DEFAULT_PROJECT_CONFIG:-$SHARED_CONFIG}")"
+  if [ ! -f "$CONFIG" ]; then
+    echo "kickoff: config not found: $CONFIG — run install.sh --apply first (or set EDGE_RDD_CONFIG)" >&2
+    exit 2
+  fi
+  if [ "$CONFIG" != "$SHARED_CONFIG" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG"
+  fi
 fi
-# shellcheck disable=SC1090
-. "$CONFIG"
 
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
@@ -62,8 +92,11 @@ if [ -d "${RDD_REPO_DIR:-/nonexistent}/.git" ]; then
   esac
   git -C "$RDD_REPO_DIR" show-ref --verify --quiet "refs/remotes/origin/$MAIN" \
     || warn "origin/$MAIN not found in the clone — git fetch, or check RDD_MAIN_BRANCH"
-  [ -f "$RDD_REPO_DIR/$DOCS/PROJECT_STATE.md" ] \
-    || warn "handoff docs not seeded ($DOCS/PROJECT_STATE.md missing) — commit project-repo/docs/agent/ into the repo first"
+  REQUIRED_DOCS=(PROJECT_STATE.md TASKS.md QUALITY_GATES.md KNOWLEDGE_STAGING.md RESEARCH_TRANSFER.md EDGE_COLLABORATION.md)
+  for handoff_doc in "${REQUIRED_DOCS[@]}"; do
+    [ -f "$RDD_REPO_DIR/$DOCS/$handoff_doc" ] \
+      || warn "handoff parity: $DOCS/$handoff_doc missing — preserve existing docs and seed only absent files"
+  done
 else
   fail "local clone missing or not a git repo: ${RDD_REPO_DIR:-unset} — the wrapper refuses to dispatch without it"
 fi

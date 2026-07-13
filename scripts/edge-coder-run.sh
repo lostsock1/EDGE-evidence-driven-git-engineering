@@ -18,8 +18,9 @@
 #                     stays inside the dispatching agent's exec-timeout budget.
 #   status:           show lock holder + recent runs.
 #
-# CONFIGURATION — everything lives in a config file sourced at startup:
-#   $EDGE_RDD_CONFIG  >  ~/.config/edge-rdd/config.env  >  built-in defaults
+# CONFIGURATION — layered at startup:
+#   ~/.config/edge-rdd/config.env (shared model/timeout/variant policy), then
+#   $EDGE_RDD_CONFIG or RDD_DEFAULT_PROJECT_CONFIG (project identity overlay).
 # See template.env.example in the template repo for every knob.
 #
 # MODEL FALLBACK: opencode has NO native retry-on-429 and NO provider fallback —
@@ -32,10 +33,11 @@
 # Failure = nonzero exit OR {"type":"error"} stream event OR no text produced.
 # A permission block or a normal completion is NOT a failure.
 #
-# PR FLOW (required once the trunk is branch-protected): the coder works on a
-# <prefix>/* branch and opens a PR to the trunk; direct pushes are rejected by
-# GitHub. The dispatch protocol (SUFFIX below) instructs this and the trailer
-# carries PR:.
+# PR FLOW (permissive completion): the coder should use a <prefix>/* branch and
+# open a PR to the trunk for committed implementation work; direct pushes to a
+# protected trunk are rejected by GitHub. Commitless/docs-only work may complete
+# without a PR. The wrapper reports model-reported state and missing PR/trailer
+# explicitly rather than inferring success.
 #
 # Reliability:
 #   - $HOME/.git guard: a stray git repo at $HOME makes opencode snapshot-walk
@@ -63,9 +65,38 @@ set -uo pipefail
 [ -f "$HOME/.openclaw/.env" ] && source "$HOME/.openclaw/.env"
 
 # ---- configuration --------------------------------------------------------
-CONFIG="${EDGE_RDD_CONFIG:-$HOME/.config/edge-rdd/config.env}"
+# config.env owns shared runtime policy (models/timeouts/variants). A selected
+# per-project file overlays project identity only. Clear identity between the
+# two sources so an incomplete project file cannot silently dispatch the
+# primary project from config.env.
+SHARED_CONFIG="${RDD_SHARED_CONFIG:-$HOME/.config/edge-rdd/config.env}"
 # shellcheck disable=SC1090
-[ -f "$CONFIG" ] && . "$CONFIG"
+[ -f "$SHARED_CONFIG" ] && . "$SHARED_CONFIG"
+CONFIG="${EDGE_RDD_CONFIG:-${RDD_DEFAULT_PROJECT_CONFIG:-$SHARED_CONFIG}}"
+PROJECT_IDENTITY_KEYS=(
+  RDD_REPO_DIR RDD_REPO_SLUG RDD_REPO_URL RDD_PROJECT_NAME RDD_PROJECT_SLUG
+  RDD_MAIN_BRANCH RDD_BRANCH_PREFIX RDD_DOCS_DIR RDD_TG_CHANNEL RDD_TG_TARGET
+  RDD_TG_THREAD RDD_REQUIRED_CHECKS
+)
+if [ "$CONFIG" != "$SHARED_CONFIG" ]; then
+  # A project file is identity-only. Evaluate it in a child shell and import
+  # only the allowlisted declarations; model/executable/timeout/state overrides
+  # cannot escape into this wrapper even if a stale project file contains them.
+  for key in "${PROJECT_IDENTITY_KEYS[@]}"; do unset "$key"; done
+  if [ -f "$CONFIG" ]; then
+    PROJECT_DECLS="$(bash -c '
+      . "$1" >/dev/null
+      shift
+      for key in "$@"; do declare -p "$key" 2>/dev/null || true; done
+    ' bash "$CONFIG" "${PROJECT_IDENTITY_KEYS[@]}")" || {
+      echo "edge-coder-run: failed to read selected project config $CONFIG" >&2
+      exit 2
+    }
+    while IFS= read -r declaration; do
+      [ -n "$declaration" ] && eval "$declaration"
+    done <<< "$PROJECT_DECLS"
+  fi
+fi
 
 OPENCODE=${EDGE_CODER_OPENCODE:-${RDD_OPENCODE:-$HOME/.opencode/bin/opencode}}
 OCLI=${RDD_OPENCLAW:-$HOME/.local/bin/openclaw}
@@ -98,8 +129,8 @@ GATE_SCRIPT=${RDD_GATE_SCRIPT:-$HOME/.openclaw/shared-scripts/edge-pr-gate.sh}
 
 ts() { date +%Y-%m-%dT%H:%M:%S%z; }
 mkdir -p "$(dirname "$LOG")" "$RUNS_DIR" "$LOCKDIR"
-# Cleanup rotated stream logs older than 7 days
-find "$RUNS_DIR" -name "stream.log.old" -mtime +7 -delete 2>/dev/null || true
+# Per-run stream logs are immutable; never reuse a shared stream.log.
+find "$RUNS_DIR" -type f -name '*.stream.log' -mtime +7 -delete 2>/dev/null || true
 
 # ---- dependency preflight ---------------------------------------------------
 for c in flock setsid timeout git python3; do
@@ -125,6 +156,34 @@ send_tg() { # send_tg "<message>"  (best-effort; EDGE_CODER_DRYRUN_MSG=1 prints 
   [ -n "$NUDGE_THREAD" ] && thread_args=(--thread-id "$NUDGE_THREAD")
   timeout 60 "$OCLI" message send --channel "$NUDGE_CHANNEL" --target "$NUDGE_TARGET" \
     "${thread_args[@]}" --message "$msg" >>"$LOG" 2>&1
+}
+
+strict_ci_verdict() { # strict_ci_verdict '<checks-json>' -> verdict<TAB>detail
+  python3 - "${RDD_REQUIRED_CHECKS:-}" "$1" <<'PY'
+import json, sys
+required = [x.strip() for x in sys.argv[1].split(",") if x.strip()]
+try:
+    checks = json.loads(sys.argv[2])
+except Exception:
+    print("unavailable\tchecks response was not JSON")
+    raise SystemExit
+if not checks:
+    print("no-ci\tno checks reported")
+    raise SystemExit
+by_name = {c.get("name"): c.get("bucket") for c in checks}
+if any(c.get("bucket") == "fail" for c in checks):
+    failed = ", ".join(c.get("name", "unnamed") for c in checks if c.get("bucket") == "fail")
+    print(f"red\tfailing checks: {failed}")
+    raise SystemExit
+missing = [name for name in required if name not in by_name]
+if missing:
+    print("missing-required\tmissing required: " + ", ".join(missing))
+    raise SystemExit
+if any(c.get("bucket") != "pass" for c in checks):
+    print("pending\tchecks not all passed")
+    raise SystemExit
+print("green\tall checks passed; required contexts present")
+PY
 }
 
 # ---- arg parsing ------------------------------------------------------------
@@ -242,6 +301,31 @@ if [ ${#MODELS[@]} -eq 0 ]; then
   echo "edge-coder-run: RDD_MODELS is empty — define the ordered tier ladder in $CONFIG (see template.env.example)." >&2
   exit 2
 fi
+if [ "$CONFIG" != "$SHARED_CONFIG" ] && [ -z "${RDD_REPO_DIR:-}" ]; then
+  echo "edge-coder-run: selected project config $CONFIG has no RDD_REPO_DIR; refusing to inherit project identity from config.env" >&2
+  exit 2
+fi
+validate_aligned() { # validate_aligned NAME allow-empty values...
+  local name="$1" allow_empty="$2"; shift 2
+  local count=$#
+  if [ "$count" -eq 0 ] && [ "$allow_empty" = yes ]; then return 0; fi
+  if [ "$count" -ne "${#MODELS[@]}" ]; then
+    echo "edge-coder-run: $name has $count value(s), but RDD_MODELS has ${#MODELS[@]}; arrays must be index-aligned" >&2
+    exit 2
+  fi
+}
+validate_aligned RDD_TIMEOUTS_BG no "${TIMEOUTS_BG[@]}"
+validate_aligned RDD_TIMEOUTS_FG no "${TIMEOUTS_FG[@]}"
+validate_aligned RDD_VARIANTS yes "${VARIANTS[@]}"
+for profile_name in FAST STANDARD DEEP MAX; do
+  profile_value_var="RDD_VARIANTS_${profile_name}"
+  read -r -a profile_values <<< "${!profile_value_var:-}"
+  validate_aligned "$profile_value_var" yes "${profile_values[@]}"
+done
+if [ "${EFFORT_PROFILE:-static}" = max ] && [ -z "${RDD_VARIANTS_MAX:-}" ]; then
+  echo "edge-coder-run: effort=max requires an explicit RDD_VARIANTS_MAX map; refusing to run baseline variants while labelled max" >&2
+  exit 2
+fi
 if [ -d "$HOME/.git" ]; then
   echo "edge-coder-run: REFUSING — $HOME/.git exists. opencode would snapshot-walk all of \$HOME and hang forever. Remove it first (rm -rf \$HOME/.git)." >&2
   exit 2
@@ -263,7 +347,7 @@ run_dispatch() {
   HEAD_BEFORE="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo '')"
 
   # Dispatch protocol: PR-based branch flow (trunk is protected), CI runs the
-  # tests on the PR, mandatory independent reviewer, durable EDGE feedback via
+  # tests on the PR, required reviewer dispatch (model-reported trust), durable EDGE feedback via
   # the collaboration doc, machine-readable trailer.
   local SUFFIX
   read -r -d '' SUFFIX <<'PROTO'
@@ -273,15 +357,19 @@ run_dispatch() {
 1. BRANCH DISCIPLINE: {{MAIN}} is branch-protected — direct pushes to {{MAIN}}
    are rejected by GitHub. If HEAD is already on a {{PREFIX}}/* branch for this
    task, continue there; otherwise create {{PREFIX}}/<short-task-slug> from
-   {{MAIN}}. Commit there, push with git, and OPEN A PULL REQUEST to {{MAIN}}
-   using `gh pr create` — NEVER the github MCP write tools (they auto-reject
-   in this non-interactive dispatch and strand the run without a PR).
-   A human merges; never merge yourself.
-2. Write code and tests; verify by reading the code back. Do NOT run tests,
-   linters, or type checkers locally — CI runs the full suite on your PR.
-   Only list under TESTS-TO-RUN commands CI cannot run.
+   {{MAIN}}. For committed implementation work, commit there, push with git,
+   and OPEN A PULL REQUEST to {{MAIN}} using `gh pr create` — NEVER the
+   github MCP write tools (they auto-reject in this non-interactive dispatch).
+   Commitless/docs-only work may have no PR. A human merges; never merge
+   yourself. Report actual model state; do not claim a PR exists if none was found.
+2. Write code and tests. Run targeted local validation when it is feasible and
+   safe (the smallest relevant test/lint/type-check); CI remains authoritative
+   for the full required suite. If local validation is infeasible, say why.
+   TESTS-TO-RUN must state what ran and passed, or what remains for CI.
 3. For any non-trivial change, dispatch the reviewer subagent for an
    independent read-only review before finishing. Your own review does not count.
+   The wrapper can enforce the reported verdict and head SHA, but cannot prove
+   reviewer identity because coder and reviewer share one runtime account.
 4. If you hit an EDGE boundary (an architecture / method / model / stack
    decision, a question whose answer is external evidence, or a bug that looks
    upstream/platform), do NOT improvise: write a research-request into
@@ -368,7 +456,7 @@ for line in sys.stdin:
         t = e.get("text") or e.get("part", {}).get("text")
         if t:
             texts.append(t)
-if not has_text:
+if not has_text or not "".join(texts).strip():
     sys.exit(1)
 print("".join(texts))
 ')"
@@ -388,11 +476,9 @@ print("".join(texts))
     # every hard-timeout into "empty-or-error-output" in the ledger.
     ERRTMP="$(mktemp /tmp/edge-coder-stderr.XXXXXX)"
     OCRC="$(mktemp /tmp/edge-coder-rc.XXXXXX)"
-    STREAM_LOG="$RUNS_DIR/stream.log"
-    # Rotate if over 10MB
-    if [ -f "$STREAM_LOG" ] && [ "$(stat -c%s "$STREAM_LOG" 2>/dev/null || echo 0)" -gt 10485760 ]; then
-      mv "$STREAM_LOG" "$STREAM_LOG.old" 2>/dev/null || true
-    fi
+    # Immutable per-run stream capture; RUN_ID is unique for async runs and
+    # $$ disambiguates foreground runs. Never append to a shared stream.log.
+    STREAM_LOG="$RUNS_DIR/${RUN_ID:-fg-$$}.stream.log"
     OUT="$( { cd "$DIR" && \
       timeout --signal=TERM --kill-after=30 "$WORK_TO" \
       "$OPENCODE" run --format json --model "$M" "${VARIANT_ARGS[@]}" --agent "$AGENT" "${PARTIAL}${TASK}${SUFFIX}"; echo $? >"$OCRC"; } 2>>"$ERRTMP" | \
@@ -420,16 +506,17 @@ for line in sys.stdin:
         t = e.get("text") or e.get("part", {}).get("text")
         if t:
             texts.append(t)
-if has_error or not has_text:
+if has_error or not has_text or not "".join(texts).strip():
     sys.exit(1)
 print("".join(texts))
 ')"
     RC=$?
     OPENCODE_RC="$(cat "$OCRC" 2>/dev/null || echo '')"
     rm -f "$OCRC"
-    # Prefer opencode's own nonzero exit (124/137 = timeout kill) over the
-    # parser's generic 1 when classifying the failure.
-    [ -n "$OPENCODE_RC" ] && [ "$OPENCODE_RC" != 0 ] && [ $RC -ne 0 ] && RC="$OPENCODE_RC"
+    # OpenCode's process status is authoritative. It may emit a final text
+    # event and still exit nonzero; accepting that text as success would hide
+    # provider/tool failures. Prefer any real nonzero exit over parser status.
+    [ -n "$OPENCODE_RC" ] && [ "$OPENCODE_RC" != 0 ] && RC="$OPENCODE_RC"
     cat "$ERRTMP" >> "$LOG" 2>/dev/null
     if [ $RC -ne 0 ]; then
       REASON="$(classify_failure "$RC" "$ERRTMP")"
@@ -462,11 +549,22 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   printf '%s\n' "$OUT"
 
   # Trailer verification (mechanical — do not trust model adherence).
-  local TRAILER_OK="yes"
+  local TRAILER_OK="yes" REVIEWER_VERDICT="missing" REVIEWER_DETAIL=""
   if ! printf '%s' "$OUT" | grep -q '=== LOOP STATUS ==='; then
     TRAILER_OK="MISSING"
     echo "[$(ts)] WARN trailer missing (model=$USED_MODEL)" >> "$LOG"
+  else
+    REVIEWER_LINE="$(printf '%s\n' "$OUT" | awk '/^=== LOOP STATUS ===/{in_loop=1; next} /^=== END ===/{in_loop=0} in_loop && /^REVIEWER:/{line=$0} END{print line}')"
+    REVIEWER_DETAIL="${REVIEWER_LINE#REVIEWER: }"
+    case "${REVIEWER_DETAIL%% — *}" in
+      Pass) REVIEWER_VERDICT=pass ;;
+      "Pass with risks") REVIEWER_VERDICT=pass-with-risks ;;
+      Fail) REVIEWER_VERDICT=fail ;;
+      not-run) REVIEWER_VERDICT=not-run ;;
+      *) REVIEWER_VERDICT=missing ;;
+    esac
   fi
+  local TASK_CLASS=nontrivial
 
   # Loop closer: branch, commits, PR, open EDGE requests, nudge.
   local branch head_after commits collab open_reqs pr_url pr_num
@@ -474,6 +572,12 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   head_after="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo '')"
   if [ -n "$HEAD_BEFORE" ] && [ -n "$head_after" ] && [ "$HEAD_BEFORE" != "$head_after" ]; then
     commits="$(git -C "$DIR" log --oneline "${HEAD_BEFORE}..${head_after}" 2>/dev/null | head -10)"
+    changed_files="$(git -C "$DIR" diff --name-only "${HEAD_BEFORE}..${head_after}" 2>/dev/null)"
+    if [[ "${TASK,,}" =~ ^[[:space:]]*(docs?|typo|spelling|copy|comment|formatting)(:|[[:space:]]) ]] \
+       && [ -n "$changed_files" ] \
+       && ! printf '%s\n' "$changed_files" | grep -qEv '(^|/)(docs?|notes?)/|\.(md|txt|rst)$'; then
+      TASK_CLASS=trivial
+    fi
   else
     commits="(no new commits — coder may have left work uncommitted or committed on another branch)"
   fi
@@ -490,10 +594,29 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   echo "variant: ${USED_VARIANT:-default}"
   [ -n "$FAIL_SUMMARY" ] && echo "fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
   echo "branch: $branch"
-  echo "trailer: $TRAILER_OK"
-  echo "PR: ${pr_url:-none found for head branch}"
+  echo "trailer: $TRAILER_OK (model-reported; parsed mechanically)"
+  echo "reviewer verdict: $REVIEWER_VERDICT${REVIEWER_DETAIL:+ — $REVIEWER_DETAIL} (model-reported only)"
+  echo "review trust limit: the wrapper cannot prove an independent reviewer actually ran"
+  echo "gate readiness: $([ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; } && echo eligible-for-CI-gate || echo BLOCKED-by-review)"
+  if [ -n "$pr_url" ]; then
+    echo "PR: $pr_url (observed open PR for head branch)"
+  else
+    echo "PR: MISSING (no open PR observed for head branch; model-reported completion may still be commitless/docs-only)"
+  fi
   echo "new commits:"
   printf '%s\n' "$commits"
+
+  # Persist the reviewer gate on GitHub so a later/on-another-machine gate
+  # sweep can enforce it. This attests only what the model reported; it is not
+  # cryptographic proof that the reviewer ran.
+  if [ "$HAVE_GH" = 1 ] && [ -n "$pr_num" ]; then
+    review_sha="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || true)"
+    review_ready=no
+    if [ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; }; then review_ready=yes; fi
+    marker="<!-- edge-review-gate sha=$review_sha class=$TASK_CLASS verdict=$REVIEWER_VERDICT ready=$review_ready trust=model-reported -->"
+    (cd "$DIR" && timeout 25 gh pr comment "$pr_num" --body "$marker") >>"$LOG" 2>&1 || \
+      echo "[$(ts)] WARN could not persist reviewer marker for PR#$pr_num" >> "$LOG"
+  fi
 
   open_reqs=""
   collab="$DIR/$DOCS_DIR/EDGE_COLLABORATION.md"
@@ -532,7 +655,10 @@ fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
     msg="$msg
 branch: $branch
 PR: ${pr_url:-none}
-trailer: $TRAILER_OK
+trailer: $TRAILER_OK (model-reported; parsed mechanically)
+reviewer: $REVIEWER_VERDICT (model-reported only; wrapper cannot prove reviewer execution)
+PR state: $([ -n "$pr_url" ] && echo "observed open PR" || echo "MISSING — no open PR observed; this is not a claim that model work failed")
+gate readiness: $([ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; } && echo eligible-for-CI-gate || echo BLOCKED-by-review)
 commits:
 ${commits}"
     [ -n "$open_reqs" ] && msg="$msg
@@ -555,29 +681,47 @@ full output: $RUNS_DIR/${RUN_ID}.log"
       while [ $n -lt $CI_POLL_MAX ]; do
         sleep $CI_POLL_SECS
         n=$((n+1))
-        checks="$(cd "$DIR" && timeout 25 gh pr checks "$pr_num" --json name,bucket 2>/dev/null)" || continue
+        # `gh pr checks` can exit nonzero while still emitting valid JSON for
+        # failed checks; never discard parseable stdout because of its rc.
+        checks="$(cd "$DIR" && timeout 25 gh pr checks "$pr_num" --json name,bucket 2>/dev/null)"
         [ -n "$checks" ] || continue
-        pending="$(printf '%s' "$checks" | jq '[.[]|select(.bucket=="pending")]|length' 2>/dev/null || echo 1)"
-        if [ "$pending" = "0" ]; then
-          fails="$(printf '%s' "$checks" | jq -r '[.[]|select(.bucket=="fail")|.name]|join(", ")' 2>/dev/null)"
-          if [ -n "$fails" ]; then
-            send_tg "❌ PR #$pr_num CI: FAILED — $fails
+        ci_state="$(strict_ci_verdict "$checks")"
+        ci_verdict="${ci_state%%$'\t'*}"
+        ci_detail="${ci_state#*$'\t'}"
+        case "$ci_verdict" in
+          pending|no-ci) continue ;;
+          red)
+            send_tg "❌ PR #$pr_num CI: FAILED — $ci_detail
 $pr_url"
-          else
-            send_tg "✅ PR #$pr_num CI: all checks green — ready for human merge.
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+          missing-required|unavailable)
+            send_tg "⛔ PR #$pr_num CI is not gate-ready — $ci_detail
 $pr_url"
-            # Trigger an immediate gate sweep so the merge button appears now,
-            # without waiting for the next on-demand /gate sweep.
-            if [ -x "$GATE_SCRIPT" ]; then
-              bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
-              echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+          green)
+            if [ "$TASK_CLASS" = nontrivial ] && { [ "$TRAILER_OK" != yes ] || [[ "$REVIEWER_VERDICT" != pass* ]]; }; then
+              send_tg "⛔ PR #$pr_num CI is green, but reviewer verdict is $REVIEWER_VERDICT — NOT gate-ready. This verdict is parsed from model output and cannot prove reviewer execution.
+$pr_url"
+            else
+              send_tg "✅ PR #$pr_num CI: all checks green, all named contexts present; reviewer gate eligible — ready for human merge. Reviewer evidence is model-reported, not independently provable by the wrapper.
+$pr_url"
+              # Trigger an immediate gate sweep so the merge button appears now,
+              # without waiting for the next on-demand /gate sweep.
+              if [ -x "$GATE_SCRIPT" ]; then
+                bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
+                echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
+              fi
             fi
-          fi
-          echo "[$(ts)] CI verdict sent PR#$pr_num fails='$fails'" >> "$LOG"
-          exit 0
-        fi
+            echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
+            exit 0
+            ;;
+        esac
       done
-      send_tg "⏳ PR #$pr_num CI: still pending after $((CI_POLL_SECS*CI_POLL_MAX/60)) min — check manually: $pr_url"
+      send_tg "⏳ PR #$pr_num CI: no complete gate-ready verdict after $((CI_POLL_SECS*CI_POLL_MAX/60)) min (pending or no checks reported) — check manually: $pr_url"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
   fi

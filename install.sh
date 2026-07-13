@@ -13,8 +13,9 @@
 #   ├── SOUL.md, AGENTS.md, HEARTBEAT.md, ...     (workspace docs)
 #   ├── personas/                                  (FRONTIER, etc.)
 #   ├── templates/                                 (north-star-spec.md, etc.)
-#   ├── projects/<slug>/                           (git clone of project repo)
-#   ├── context/<slug>/notes/                      (EDGE research context)
+#   ├── projects/<slug>/                           (EDGE charter/resume/notes only)
+#   ├── config/edge-rdd/<slug>.env                 (project identity)
+#   └── project repo at RDD_REPO_DIR               (separate git checkout)
 #   ├── config/edge-rdd/config.env                 (dispatch config — primary project + model chain)
 #   ├── config/edge-rdd/gate.env                   (PR gate hub)
 #   ├── config/edge-rdd/research.env               (OpenScience research dispatch)
@@ -44,9 +45,17 @@ for var in RDD_AGENT_ID RDD_AGENT_NAME RDD_PROJECT_NAME RDD_PROJECT_SLUG RDD_REP
   fi
 done
 
-# Derive paths
+# Derive paths. Config values are shell strings, so safely expand only a
+# leading ~/ (embedded tildes remain literal).
+expand_leading_tilde() {
+  case "$1" in
+    ~) printf '%s' "$HOME" ;;
+    ~/*) printf '%s/%s' "$HOME" "${1#~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 WORKSPACE="$HOME/.openclaw/workspace-${RDD_AGENT_ID}"
-REPO_DIR="$WORKSPACE/projects/${RDD_PROJECT_SLUG}"
+REPO_DIR="$(expand_leading_tilde "${RDD_REPO_DIR:-$HOME/projects/${RDD_PROJECT_NAME}}")"
 CONFIG_DIR="$WORKSPACE/config/edge-rdd"
 STATE_DIR="$HOME/.local/state/edge-rdd"
 
@@ -60,6 +69,9 @@ mkdir -p rendered
 # Inject derived vars for template rendering
 export RDD_HOME="$HOME"
 export RDD_REPO_DIR="$REPO_DIR"
+export RDD_OPENCODE="$(expand_leading_tilde "${RDD_OPENCODE:-$HOME/.opencode/bin/opencode}")"
+export RDD_OPENCLAW="$(expand_leading_tilde "${RDD_OPENCLAW:-$HOME/.local/bin/openclaw}")"
+export RDD_PATH_PREPEND="$(expand_leading_tilde "${RDD_PATH_PREPEND:-$HOME/.local/bin}")"
 export RDD_WORKSPACE="$WORKSPACE"
 export RDD_LOG="$STATE_DIR/edge-coder-run.log"
 export RDD_RUNS_DIR="$STATE_DIR/runs"
@@ -85,15 +97,26 @@ for line in open(env_file):
 home = os.environ.get("HOME", "")
 tokens["HOME"] = home
 tokens["WORKSPACE"] = f"{home}/.openclaw/workspace-{tokens.get('AGENT_ID', 'edge')}"
-tokens["REPO_DIR"] = f"{tokens['WORKSPACE']}/projects/{tokens.get('PROJECT_SLUG', 'myproject')}"
+tokens["REPO_DIR"] = os.environ.get("RDD_REPO_DIR") or f"{home}/projects/{tokens.get('PROJECT_NAME', 'MyProject')}"
 tokens["LOG"] = f"{home}/.local/state/edge-rdd/edge-coder-run.log"
 tokens["RUNS_DIR"] = f"{home}/.local/state/edge-rdd/runs"
+# Keep derived path tokens normalized for rendered config and scripts.
+for key in ("OPENCODE", "OPENCLAW", "PATH_PREPEND", "REPO_DIR"):
+    value = tokens.get(key, "")
+    if value == "~":
+        tokens[key] = home
+    elif value.startswith("~/"):
+        tokens[key] = home + value[1:]
 tokens["LOCKDIR"] = f"{home}/.local/state/edge-rdd/locks"
 
-# Expand ~ in paths
-for k in ["OPENCODE", "OPENCLAW", "PATH_PREPEND"]:
+# Expand only a leading ~/ in path config; embedded tildes are literal.
+for k in ["OPENCODE", "OPENCLAW", "PATH_PREPEND", "REPO_DIR"]:
     if k in tokens:
-        tokens[k] = tokens[k].replace("~", home)
+        value = tokens[k]
+        if value == "~":
+            tokens[k] = home
+        elif value.startswith("~/"):
+            tokens[k] = home + value[1:]
 
 render_dirs = ["opencode", "openclaw", "workspace-edge", "project-repo"]
 token_re = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
@@ -156,8 +179,8 @@ symlink() { # symlink <target> <link>
 }
 
 # 1. Create workspace structure
-mkdir -p "$WORKSPACE"/{projects,context,config/edge-rdd,config/opencode/agents,skills,scripts}
-mkdir -p "$WORKSPACE/context/${RDD_PROJECT_SLUG}/notes"
+mkdir -p "$WORKSPACE"/{projects,config/edge-rdd,config/opencode/agents,skills,scripts}
+mkdir -p "$WORKSPACE/projects/${RDD_PROJECT_SLUG}/notes"
 mkdir -p "$STATE_DIR"/{runs,locks,pr-gate}
 
 # 2. Workspace docs (SOUL.md, AGENTS.md, etc.)
@@ -217,7 +240,7 @@ if [ -d "rendered/workspace-edge/templates" ]; then
 fi
 
 # 5. Scripts (workspace-edge/scripts/)
-for f in edge-coder-run.sh edge-pr-gate.sh openscience-research.sh openscience-research.py openscience-smoke.sh; do
+for f in edge-coder-run.sh edge-pr-gate.sh validate-superior-architecture.py openscience-research.sh openscience-research.py openscience-smoke.sh; do
   if [ -f "scripts/$f" ]; then
     install -m 0755 "scripts/$f" "$WORKSPACE/scripts/$f"
     echo "  installed: scripts/$f"
@@ -255,73 +278,92 @@ if [ -d "rendered/opencode/agents/code-monkeys" ]; then
 fi
 
 # 8. Dispatch config (workspace-edge/config/edge-rdd/config.env)
-# config.env is the wrapper's DEFAULT config: the primary project plus the
-# single-source model tier ladder. Additional projects get their own
-# <slug>.env (copy config.env, adjust the project block) selected per dispatch
-# with EDGE_RDD_CONFIG=~/.config/edge-rdd/<slug>.env.
-cat > "$CONFIG_DIR/config.env" <<CFGEOF
-# Primary project: $RDD_PROJECT_NAME — dispatch config (generated by install.sh)
-RDD_OPENCODE=$HOME/.opencode/bin/opencode
-RDD_OPENCLAW=$HOME/.local/bin/openclaw
-RDD_REPO_DIR=$REPO_DIR
-RDD_AGENT=${RDD_AGENT:-code-monkeys/coder}
-RDD_MAIN_BRANCH=${RDD_MAIN_BRANCH:-main}
-RDD_BRANCH_PREFIX=${RDD_BRANCH_PREFIX:-cm}
-RDD_DOCS_DIR=${RDD_DOCS_DIR:-docs/agent}
-RDD_LOG=$STATE_DIR/edge-coder-run.log
-RDD_RUNS_DIR=$STATE_DIR/runs
-RDD_LOCKDIR=$STATE_DIR/locks
-RDD_TG_CHANNEL=${RDD_TG_CHANNEL:-telegram}
-RDD_TG_TARGET=${RDD_TG_TARGET:-}
-RDD_TG_THREAD=${RDD_TG_THREAD:-}
-RDD_CI_POLL_SECS=${RDD_CI_POLL_SECS:-60}
-RDD_CI_POLL_MAX=${RDD_CI_POLL_MAX:-40}
-RDD_PATH_PREPEND=${RDD_PATH_PREPEND:-$HOME/.local/bin}
-RDD_GATE_SCRIPT=$HOME/.openclaw/shared-scripts/edge-pr-gate.sh
-RDD_REQUIRED_CHECKS="${RDD_REQUIRED_CHECKS:-}"
+# config.env contains shared runtime policy only. Project identity lives in a
+# separate <slug>.env so selecting one project cannot inherit another's repo,
+# chat, branch, or required-check identity. Existing generated env layers are
+# operator state: --apply never overwrites them.
+write_generated_env() {
+  local target="$1"; shift
+  if [ -e "$target" ]; then
+    echo "  kept existing generated env: $target"
+    return 0
+  fi
+  cat > "$target"
+}
+write_generated_env "$CONFIG_DIR/config.env" <<CFGEOF
+# Shared dispatch policy (generated by install.sh)
+RDD_DEFAULT_PROJECT_CONFIG=$(printf '%q' "$CONFIG_DIR/${RDD_PROJECT_SLUG}.env")
+RDD_OPENCODE=$(printf '%q' "$HOME/.opencode/bin/opencode")
+RDD_OPENCLAW=$(printf '%q' "$HOME/.local/bin/openclaw")
+RDD_AGENT=$(printf '%q' "${RDD_AGENT:-code-monkeys/coder}")
+RDD_LOG=$(printf '%q' "$STATE_DIR/edge-coder-run.log")
+RDD_RUNS_DIR=$(printf '%q' "$STATE_DIR/runs")
+RDD_LOCKDIR=$(printf '%q' "$STATE_DIR/locks")
+RDD_CI_POLL_SECS=$(printf '%q' "${RDD_CI_POLL_SECS:-60}")
+RDD_CI_POLL_MAX=$(printf '%q' "${RDD_CI_POLL_MAX:-40}")
+RDD_PATH_PREPEND=$(printf '%q' "${RDD_PATH_PREPEND:-$HOME/.local/bin}")
+RDD_GATE_SCRIPT=$(printf '%q' "$HOME/.openclaw/shared-scripts/edge-pr-gate.sh")
 
 # ---- model tier ladder (single source of truth — pick your own models) ----
-RDD_MODELS="${RDD_MODELS:-}"
+RDD_MODELS=$(printf '%q' "${RDD_MODELS:-}")
 # Per-tier LIVENESS-PROBE timeouts (seconds), index-aligned with RDD_MODELS.
-RDD_TIMEOUTS_BG="${RDD_TIMEOUTS_BG:-60 60}"
-RDD_TIMEOUTS_FG="${RDD_TIMEOUTS_FG:-60 60}"
+RDD_TIMEOUTS_BG=$(printf '%q' "${RDD_TIMEOUTS_BG:-60 60}")
+RDD_TIMEOUTS_FG=$(printf '%q' "${RDD_TIMEOUTS_FG:-60 60}")
 # Optional opencode model variants, index-aligned with RDD_MODELS.
-RDD_VARIANTS="${RDD_VARIANTS:-}"
+RDD_VARIANTS=$(printf '%q' "${RDD_VARIANTS:-}")
 # static (default) uses RDD_VARIANTS as-is; auto classifies task effort and
 # applies the RDD_VARIANTS_<PROFILE> maps below (empty map = keep baseline).
-RDD_VARIANT_POLICY=${RDD_VARIANT_POLICY:-static}
-RDD_VARIANTS_FAST="${RDD_VARIANTS_FAST:-}"
-RDD_VARIANTS_STANDARD="${RDD_VARIANTS_STANDARD:-}"
-RDD_VARIANTS_DEEP="${RDD_VARIANTS_DEEP:-}"
-RDD_VARIANTS_MAX="${RDD_VARIANTS_MAX:-}"
+RDD_VARIANT_POLICY=$(printf '%q' "${RDD_VARIANT_POLICY:-static}")
+RDD_VARIANTS_FAST=$(printf '%q' "${RDD_VARIANTS_FAST:-}")
+RDD_VARIANTS_STANDARD=$(printf '%q' "${RDD_VARIANTS_STANDARD:-}")
+RDD_VARIANTS_DEEP=$(printf '%q' "${RDD_VARIANTS_DEEP:-}")
+RDD_VARIANTS_MAX=$(printf '%q' "${RDD_VARIANTS_MAX:-}")
 CFGEOF
-echo "  installed: config/edge-rdd/config.env"
+# `%q` emits shell-safe values (including paths/names with whitespace). The
+# gate parser uses shlex so it reads the same representation as bash.
+write_generated_env "$CONFIG_DIR/${RDD_PROJECT_SLUG}.env" <<PROJECTEOF
+# Project identity: $RDD_PROJECT_NAME (generated by install.sh)
+RDD_PROJECT_NAME=$(printf '%q' "$RDD_PROJECT_NAME")
+RDD_PROJECT_SLUG=$(printf '%q' "$RDD_PROJECT_SLUG")
+RDD_REPO_SLUG=$(printf '%q' "$RDD_REPO_SLUG")
+RDD_REPO_DIR=$(printf '%q' "$REPO_DIR")
+RDD_MAIN_BRANCH=$(printf '%q' "${RDD_MAIN_BRANCH:-main}")
+RDD_BRANCH_PREFIX=$(printf '%q' "${RDD_BRANCH_PREFIX:-cm}")
+RDD_DOCS_DIR=$(printf '%q' "${RDD_DOCS_DIR:-docs/agent}")
+RDD_TG_CHANNEL=$(printf '%q' "${RDD_TG_CHANNEL:-telegram}")
+RDD_TG_TARGET=$(printf '%q' "${RDD_TG_TARGET:-}")
+RDD_TG_THREAD=$(printf '%q' "${RDD_TG_THREAD:-}")
+RDD_REQUIRED_CHECKS=$(printf '%q' "${RDD_REQUIRED_CHECKS:-}")
+PROJECTEOF
+echo "  installed: config/edge-rdd/{config,${RDD_PROJECT_SLUG}}.env"
 
 # 9. Gate config (workspace-edge/config/edge-rdd/gate.env)
-cat > "$CONFIG_DIR/gate.env" <<GATEEOF
+write_generated_env "$CONFIG_DIR/gate.env" <<GATEEOF
 # EDGE PR gate — the single hub thread every gate message posts to.
 # Generated by install.sh from template.env.
-RDD_GATE_TG_CHANNEL=${RDD_GATE_TG_CHANNEL:-${RDD_TG_CHANNEL:-telegram}}
-RDD_GATE_TG_TARGET=${RDD_GATE_TG_TARGET:-${RDD_TG_TARGET:-}}
-RDD_GATE_TG_THREAD=${RDD_GATE_TG_THREAD:-${RDD_TG_THREAD:-}}
+RDD_GATE_TG_CHANNEL=$(printf '%q' "${RDD_GATE_TG_CHANNEL:-${RDD_TG_CHANNEL:-telegram}}")
+RDD_GATE_TG_TARGET=$(printf '%q' "${RDD_GATE_TG_TARGET:-${RDD_TG_TARGET:-}}")
+RDD_GATE_TG_THREAD=$(printf '%q' "${RDD_GATE_TG_THREAD:-${RDD_TG_THREAD:-}}")
 GATEEOF
 echo "  installed: config/edge-rdd/gate.env"
 
 # 9b. Research dispatch config (workspace-edge/config/edge-rdd/research.env)
 # NOTE: deliberately NO RDD_REPO_DIR here — the PR gate's project sweep keys on
 # that variable, so the research config is invisible to it (no second registry).
-cat > "$CONFIG_DIR/research.env" <<RESEOF
+write_generated_env "$CONFIG_DIR/research.env" <<RESEOF
 # OpenScience research dispatch — config for openscience-research.sh
 # Default return thread mirrors the PR gate hub; assignments may pass --thread.
-RDD_RESEARCH_OS_BASE=${RDD_RESEARCH_OS_BASE:-http://127.0.0.1:3457}
-RDD_RESEARCH_AGENT=${RDD_RESEARCH_AGENT:-research}
-RDD_RESEARCH_TIMEOUT=${RDD_RESEARCH_TIMEOUT:-1200}
+RDD_RESEARCH_OS_BASE=$(printf '%q' "${RDD_RESEARCH_OS_BASE:-http://127.0.0.1:3457}")
+RDD_RESEARCH_AGENT=$(printf '%q' "${RDD_RESEARCH_AGENT:-research}")
+RDD_RESEARCH_TIMEOUT=$(printf '%q' "${RDD_RESEARCH_TIMEOUT:-1200}")
 # Provider-specific reasoning variant (empty = provider default).
-RDD_RESEARCH_VARIANT=${RDD_RESEARCH_VARIANT:-}
-RDD_RESEARCH_TG_CHANNEL=${RDD_GATE_TG_CHANNEL:-${RDD_TG_CHANNEL:-telegram}}
-RDD_RESEARCH_TG_TARGET=${RDD_GATE_TG_TARGET:-${RDD_TG_TARGET:-}}
-RDD_RESEARCH_TG_THREAD=${RDD_GATE_TG_THREAD:-${RDD_TG_THREAD:-}}
-RDD_OPENCLAW=$HOME/.local/bin/openclaw
+# Explicit per-install research variant; leave blank unless the operator has
+# configured a provider-supported value (live-only variants do not belong here).
+RDD_RESEARCH_VARIANT=$(printf '%q' "${RDD_RESEARCH_VARIANT:-}")
+RDD_RESEARCH_TG_CHANNEL=$(printf '%q' "${RDD_GATE_TG_CHANNEL:-${RDD_TG_CHANNEL:-telegram}}")
+RDD_RESEARCH_TG_TARGET=$(printf '%q' "${RDD_GATE_TG_TARGET:-${RDD_TG_TARGET:-}}")
+RDD_RESEARCH_TG_THREAD=$(printf '%q' "${RDD_GATE_TG_THREAD:-${RDD_TG_THREAD:-}}")
+RDD_OPENCLAW=$(printf '%q' "$HOME/.local/bin/openclaw")
 RESEOF
 echo "  installed: config/edge-rdd/research.env"
 
@@ -350,6 +392,7 @@ fi
 # 12. Create symlinks
 echo ""
 echo "--- creating symlinks ---"
+mkdir -p "$HOME/.config" "$HOME/.openclaw/skills" "$HOME/.openclaw/shared-scripts"
 
 # ~/.config/edge-rdd -> workspace/config/edge-rdd
 symlink "$CONFIG_DIR" "$HOME/.config/edge-rdd"
@@ -362,8 +405,7 @@ for sk in gate research; do
 done
 
 # ~/.openclaw/shared-scripts/* -> workspace/scripts/*
-mkdir -p "$HOME/.openclaw/shared-scripts"
-for f in edge-coder-run.sh edge-pr-gate.sh openscience-research.sh openscience-research.py openscience-smoke.sh; do
+for f in edge-coder-run.sh edge-pr-gate.sh validate-superior-architecture.py openscience-research.sh openscience-research.py openscience-smoke.sh; do
   symlink "$WORKSPACE/scripts/$f" "$HOME/.openclaw/shared-scripts/$f"
   echo "  symlink: ~/.openclaw/shared-scripts/$f -> workspace/scripts/$f"
 done
@@ -387,9 +429,10 @@ echo "2. Merge rendered/openclaw/topic.project-thread.json5 into your Telegram g
 echo "   and rendered/openclaw/topic.hub-thread.json5 for the gate/coordination hub thread"
 echo "3. openclaw config validate && systemctl --user restart openclaw-gateway"
 echo "4. Copy project-repo/.github/workflows/ci.yml.example into your repo as .github/workflows/ci.yml"
-echo "5. bash github/protect-branch.sh (after CI ran once)"
+echo "5. EDGE_RDD_CONFIG=$CONFIG_DIR/${RDD_PROJECT_SLUG}.env bash github/protect-branch.sh (after CI ran once)"
 echo "6. Smoke test: bash $WORKSPACE/scripts/edge-coder-run.sh status"
 echo "   PR gate:    bash $WORKSPACE/scripts/edge-pr-gate.sh sweep --dry-run"
+echo "   North star: python3 $WORKSPACE/scripts/validate-superior-architecture.py --workspace $WORKSPACE --project ${RDD_PROJECT_SLUG} --heartbeat"
 echo "7. Kick off: bash scripts/kickoff.sh"
 echo "8. Build the gapped lab Docker image: cd $WORKSPACE && lab/lab-run.sh --image"
 echo "9. OPTIONAL research companion (dual-research protocol): install OpenScience"
