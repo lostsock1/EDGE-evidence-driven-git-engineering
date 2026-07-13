@@ -9,6 +9,15 @@ python3 scripts/validate-superior-architecture.py \
   --workspace . --project <slug> --heartbeat
 ```
 
+For an existing artifact whose canonical location is intentionally different, use explicit paths rather than copying or inventing content:
+
+```bash
+python3 scripts/validate-superior-architecture.py \
+  --workspace . --project <slug> \
+  --north-star-path <existing-spec> \
+  --architecture-path <existing-architecture> --heartbeat
+```
+
 - `PASS` means the operator-attested product authority exists and the artifact
   is substantive, source-indexed, versioned, within the age limit, SHA-256-bound
   to the exact north-star spec bytes, and bound to every declared local Markdown
