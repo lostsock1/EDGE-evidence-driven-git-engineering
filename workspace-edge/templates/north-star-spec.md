@@ -13,7 +13,9 @@ produce the operator's north-star specification for a new project.
 3. Append **add-ons** as needed: *Technical* (system-design depth), *Product* (requirements
    depth), *Adversarial* (failure analysis depth). They compose — any subset works.
 4. The output lands verbatim at `projects/{{PROJECT_SLUG}}/notes/{{PROJECT_SLUG}}-north-star.md`
-   with frontmatter `type: north-star-spec, status: unprocessed`.
+   with frontmatter `type: north-star-spec, status: unprocessed`. The **operator**, not an
+   agent, then attests that this is the accepted product authority by adding
+   `authority: operator-supplied`. Agents must never create or infer that attestation.
 5. The research agent then distills it: charter Mission first, then
    `notes/SUPERIOR_ARCHITECTURE.md` synthesis. Promotion into the repo stays gated through
    `{{DOCS_DIR}}/KNOWLEDGE_STAGING.md` → `RESEARCH_TRANSFER.md` → `TASKS.md`.

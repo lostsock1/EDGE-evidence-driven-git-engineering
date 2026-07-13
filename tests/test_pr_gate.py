@@ -14,7 +14,7 @@ mode = os.environ.get("FAKE_CHECK_MODE", "green")
 if args[:2] == ["repo", "view"]:
     print("owner/repo")
 elif args[:2] == ["pr", "list"]:
-    print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "isDraft": False, "url": "https://example/pr/1"}]))
+    print(json.dumps([{"number": 1, "title": "feat: change", "headRefName": "cm/change", "headRefOid": "abc123", "baseRefName": os.environ.get("FAKE_BASE", "main"), "baseRefOid": "base123", "mergeable": os.environ.get("FAKE_MERGEABLE", "MERGEABLE"), "mergeStateStatus": os.environ.get("FAKE_MERGE_STATE", "CLEAN"), "isDraft": False, "url": "https://example/pr/1"}]))
 elif args[:2] == ["pr", "checks"]:
     if mode == "no-ci": print("[]")
     elif mode == "missing": print(json.dumps([{"name":"tests","bucket":"pass"}]))
@@ -34,7 +34,7 @@ else:
 
 
 class PrGateTests(unittest.TestCase):
-    def run_gate(self, mode, review="pass", base="main", author="trusted-bot"):
+    def run_gate(self, mode, review="pass", base="main", author="trusted-bot", merge_state="CLEAN"):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bindir = root / "bin"; bindir.mkdir()
@@ -46,7 +46,8 @@ class PrGateTests(unittest.TestCase):
             env = os.environ.copy()
             env.update({"PATH": f"{bindir}:{env['PATH']}", "RDD_GATE_CONFIG_DIR": str(cfg),
                         "RDD_GATE_STATE_DIR": str(root / "state"), "FAKE_CHECK_MODE": mode,
-                        "FAKE_REVIEW": review, "FAKE_BASE": base, "FAKE_REVIEW_AUTHOR": author})
+                        "FAKE_REVIEW": review, "FAKE_BASE": base, "FAKE_REVIEW_AUTHOR": author,
+                        "FAKE_MERGE_STATE": merge_state})
             return subprocess.run([str(SCRIPT), "sweep", "--dry-run"], env=env, text=True, capture_output=True)
 
     def test_all_named_required_checks_must_be_present(self):
@@ -81,6 +82,11 @@ class PrGateTests(unittest.TestCase):
     def test_pr_targeting_nontrunk_base_is_not_actionable(self):
         result = self.run_gate("green", base="release")
         self.assertIn("targets release, not protected trunk main", result.stdout)
+        self.assertNotIn("pending eg:", result.stdout)
+
+    def test_nonclean_merge_state_is_not_actionable(self):
+        result = self.run_gate("green", merge_state="BEHIND")
+        self.assertIn("merge state BEHIND", result.stdout)
         self.assertNotIn("pending eg:", result.stdout)
 
 

@@ -4,6 +4,8 @@ status: living
 updated: YYYY-MM-DD
 tags: [project/{{PROJECT_SLUG}}, architecture, north-star, synthesis, evidence-weighted]
 sources: []
+# SHA-256 of projects/{{PROJECT_SLUG}}/notes/{{PROJECT_SLUG}}-north-star.md at synthesis time.
+north_star_sha256: <compute from exact spec bytes>
 aliases: [Superior Architecture, North-Star Architecture]
 ---
 

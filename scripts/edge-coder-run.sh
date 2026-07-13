@@ -72,12 +72,29 @@ SHARED_CONFIG="${RDD_SHARED_CONFIG:-$HOME/.config/edge-rdd/config.env}"
 # shellcheck disable=SC1090
 [ -f "$SHARED_CONFIG" ] && . "$SHARED_CONFIG"
 CONFIG="${EDGE_RDD_CONFIG:-${RDD_DEFAULT_PROJECT_CONFIG:-$SHARED_CONFIG}}"
+PROJECT_IDENTITY_KEYS=(
+  RDD_REPO_DIR RDD_REPO_SLUG RDD_REPO_URL RDD_PROJECT_NAME RDD_PROJECT_SLUG
+  RDD_MAIN_BRANCH RDD_BRANCH_PREFIX RDD_DOCS_DIR RDD_TG_CHANNEL RDD_TG_TARGET
+  RDD_TG_THREAD RDD_REQUIRED_CHECKS
+)
 if [ "$CONFIG" != "$SHARED_CONFIG" ]; then
-  unset RDD_REPO_DIR RDD_REPO_SLUG RDD_PROJECT_NAME RDD_PROJECT_SLUG \
-    RDD_MAIN_BRANCH RDD_BRANCH_PREFIX RDD_DOCS_DIR RDD_TG_CHANNEL \
-    RDD_TG_TARGET RDD_TG_THREAD RDD_REQUIRED_CHECKS
-  # shellcheck disable=SC1090
-  [ -f "$CONFIG" ] && . "$CONFIG"
+  # A project file is identity-only. Evaluate it in a child shell and import
+  # only the allowlisted declarations; model/executable/timeout/state overrides
+  # cannot escape into this wrapper even if a stale project file contains them.
+  for key in "${PROJECT_IDENTITY_KEYS[@]}"; do unset "$key"; done
+  if [ -f "$CONFIG" ]; then
+    PROJECT_DECLS="$(bash -c '
+      . "$1" >/dev/null
+      shift
+      for key in "$@"; do declare -p "$key" 2>/dev/null || true; done
+    ' bash "$CONFIG" "${PROJECT_IDENTITY_KEYS[@]}")" || {
+      echo "edge-coder-run: failed to read selected project config $CONFIG" >&2
+      exit 2
+    }
+    while IFS= read -r declaration; do
+      [ -n "$declaration" ] && eval "$declaration"
+    done <<< "$PROJECT_DECLS"
+  fi
 fi
 
 OPENCODE=${EDGE_CODER_OPENCODE:-${RDD_OPENCODE:-$HOME/.opencode/bin/opencode}}
@@ -329,7 +346,7 @@ run_dispatch() {
   HEAD_BEFORE="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo '')"
 
   # Dispatch protocol: PR-based branch flow (trunk is protected), CI runs the
-  # tests on the PR, mandatory independent reviewer, durable EDGE feedback via
+  # tests on the PR, required reviewer dispatch (model-reported trust), durable EDGE feedback via
   # the collaboration doc, machine-readable trailer.
   local SUFFIX
   read -r -d '' SUFFIX <<'PROTO'
@@ -349,6 +366,8 @@ run_dispatch() {
    TESTS-TO-RUN must state what ran and passed, or what remains for CI.
 3. For any non-trivial change, dispatch the reviewer subagent for an
    independent read-only review before finishing. Your own review does not count.
+   The wrapper can enforce the reported verdict and head SHA, but cannot prove
+   reviewer identity because coder and reviewer share one runtime account.
 4. If you hit an EDGE boundary (an architecture / method / model / stack
    decision, a question whose answer is external evidence, or a bug that looks
    upstream/platform), do NOT improvise: write a research-request into
@@ -494,9 +513,10 @@ print("".join(texts))
     RC=$?
     OPENCODE_RC="$(cat "$OCRC" 2>/dev/null || echo '')"
     rm -f "$OCRC"
-    # Prefer opencode's own nonzero exit (124/137 = timeout kill) over the
-    # parser's generic 1 when classifying the failure.
-    [ -n "$OPENCODE_RC" ] && [ "$OPENCODE_RC" != 0 ] && [ $RC -ne 0 ] && RC="$OPENCODE_RC"
+    # OpenCode's process status is authoritative. It may emit a final text
+    # event and still exit nonzero; accepting that text as success would hide
+    # provider/tool failures. Prefer any real nonzero exit over parser status.
+    [ -n "$OPENCODE_RC" ] && [ "$OPENCODE_RC" != 0 ] && RC="$OPENCODE_RC"
     cat "$ERRTMP" >> "$LOG" 2>/dev/null
     if [ $RC -ne 0 ]; then
       REASON="$(classify_failure "$RC" "$ERRTMP")"

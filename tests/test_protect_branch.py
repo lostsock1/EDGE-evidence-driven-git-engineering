@@ -33,12 +33,24 @@ class ProtectBranchTests(unittest.TestCase):
             capture = root / "request.json"
             env = os.environ.copy()
             env.update({"PATH": f"{root}:{env['PATH']}", "OWNER": "owner", "REPO": "repo",
-                        "BRANCH": "main", "CHECKS": "", "CAPTURE": str(capture),
-                        "EDGE_RDD_CONFIG": str(root / "missing.env")})
+                        "BRANCH": "main", "CHECKS": "", "ALLOW_EMPTY_CHECKS": "1",
+                        "CAPTURE": str(capture), "EDGE_RDD_CONFIG": str(root / "missing.env")})
             result = subprocess.run([str(SCRIPT)], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('"contexts": []', capture.read_text())
-            self.assertIn("Verified protection posture with required checks: []", result.stdout)
+            self.assertIn("WARNING: protection verified with zero CI contexts", result.stdout)
+
+    def test_empty_checks_require_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gh = root / "gh"; gh.write_text(FAKE); gh.chmod(0o755)
+            env = os.environ.copy()
+            env.update({"PATH": f"{root}:{env['PATH']}", "OWNER": "owner", "REPO": "repo",
+                        "BRANCH": "main", "CHECKS": "", "CAPTURE": str(root / "request.json"),
+                        "EDGE_RDD_CONFIG": str(root / "missing.env")})
+            result = subprocess.run([str(SCRIPT)], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("refusing zero required CI contexts", result.stderr)
 
 
 if __name__ == "__main__":

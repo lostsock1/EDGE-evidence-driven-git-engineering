@@ -17,7 +17,7 @@ This template is extracted from a production setup running commercial-grade soft
 
 ## Workspace-first design
 
-Everything lives in a single workspace directory (`~/.openclaw/workspace-${AGENT_ID}/`):
+The EDGE control plane lives in one workspace directory (`~/.openclaw/workspace-${AGENT_ID}/`); project git checkouts live separately at each `RDD_REPO_DIR`:
 
 ```
 ~/.openclaw/workspace-edge/
@@ -75,7 +75,7 @@ The loop ends at a human decision — but that decision shouldn't require openin
 
 Anything actionable — a green PR ready to merge, a stale branch to prune — becomes a **single-use pending action**, and the sweep posts one approval message per project into **one gate thread** (`RDD_GATE_TG_*` in `workspace/config/edge-rdd/gate.env` — point it at your EDGE coordination thread so every project's asks land in one place instead of scattered across per-project threads). Each ask carries an inline button per action **and a plain-language brief: what the action does, its consequence, and why it's being offered** — so you're never approving a bare button. A snooze button rides along; unchanged asks are not re-posted for 24h; a clean project posts nothing. The declared goal is **trunk-only repos**: merged work in, dead branches gone.
 
-**Approving is one tap.** A button tap delivers a native command (`/gate act eg:<id>`) to the research agent. A 👍/✅ reaction on the gate message — or replying "approve" — works too (`pending` resolves which action; if it's ambiguous the agent asks). `act` then **re-verifies at execution time** — the PR is still open against the protected trunk, its head still matches the approved SHA, strict checks and trusted-author reviewer marker still pass, or the branch is still stale — and only then executes (`gh pr merge --squash --delete-branch`, or a remote branch delete), posts the outcome back, and burns the action id.
+**Approving is one tap.** A button tap delivers a native command (`/gate act eg:<id>`) to the research agent. A 👍/✅ reaction on the gate message — or replying "approve" — works too (`pending` resolves which action; if it's ambiguous the agent asks). `act` then **re-verifies at execution time** — the PR is still open against the protected trunk, its head and trunk-base SHAs still match the approved snapshot, strict checks and trusted-author reviewer marker still pass, or the branch is still stale — and only then executes (`gh pr merge --squash --delete-branch`, or a remote branch delete), posts the outcome back, and burns the action id.
 
 **What did NOT change:** nothing merges without your explicit approval. The approval surface moved from the GitHub UI to a button in your chat; the executor moved from your thumb to the agent — *after* your tap. Actions are minted only by the sweep from observed repo state, are single-use, re-verify before executing (a stale button can never merge a PR whose CI went red), and the agent is under doctrine to never run `gh pr merge` or delete branches outside `act`. Red, pending, missing-required-check, no-CI, and reviewer-blocked PRs are never offered as actions — they ride the normal `fix the red PR` loop.
 
@@ -153,7 +153,8 @@ git clone https://github.com/you/newproject ~/projects/NewProject
 # 2. Create project-identity config (shared model policy is inherited)
 cp ~/.openclaw/workspace-edge/config/edge-rdd/myproject.env \
    ~/.openclaw/workspace-edge/config/edge-rdd/newproject.env
-# Edit: RDD_REPO_DIR, RDD_TG_THREAD, RDD_DOCS_DIR, RDD_MAIN_BRANCH
+# Edit every identity field: RDD_PROJECT_NAME/SLUG, RDD_REPO_SLUG/DIR,
+# RDD_TG_TARGET/THREAD, RDD_DOCS_DIR, RDD_MAIN_BRANCH, RDD_REQUIRED_CHECKS
 
 # 3. Create notes directory
 mkdir -p ~/.openclaw/workspace-edge/projects/newproject/notes/

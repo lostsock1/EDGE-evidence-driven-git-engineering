@@ -4,7 +4,8 @@
 # The human merge gate is MECHANICAL, not behavioral: agents cannot push to the
 # trunk even if a prompt goes wrong, because GitHub rejects it. PRs require
 # green required checks + an up-to-date branch; 0 approvals (the operator IS
-# the merge button); no force pushes; no deletions; admins included.
+# the merge button); no force pushes; no deletions; admins included. Empty
+# checks require ALLOW_EMPTY_CHECKS=1 and do not provide CI enforcement.
 #
 # Usage:
 #   OWNER=you REPO=yourrepo BRANCH=main CHECKS="tests,lint" ./protect-branch.sh
@@ -31,6 +32,10 @@ fi
 
 if [ -z "$OWNER" ] || [ -z "$REPO" ]; then
   echo "protect-branch: set OWNER/REPO (or RDD_REPO_SLUG in config.env)" >&2
+  exit 2
+fi
+if [ -z "${CHECKS_VALUE//[[:space:],]/}" ] && [ "${ALLOW_EMPTY_CHECKS:-0}" != 1 ]; then
+  echo "protect-branch: refusing zero required CI contexts; set ALLOW_EMPTY_CHECKS=1 only for a repo that intentionally has no CI (chat gate will remain non-actionable)" >&2
   exit 2
 fi
 
@@ -91,5 +96,8 @@ for setting in ("allow_force_pushes", "allow_deletions"):
 if errors:
     print("protect-branch: verification failed: " + "; ".join(errors), file=sys.stderr)
     raise SystemExit(1)
-print("Done. Verified protection posture with required checks: " + json.dumps(contexts, separators=(",", ":")))
+if not contexts:
+    print("WARNING: protection verified with zero CI contexts; GitHub does not enforce green checks and the EDGE chat gate must remain non-actionable")
+else:
+    print("Done. Verified protection posture with required checks: " + json.dumps(contexts, separators=(",", ":")))
 PY

@@ -132,7 +132,17 @@ def parse_env_file(path):
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        d[k.strip()] = v.strip().strip('"').strip("'")
+        raw = v.strip()
+        try:
+            parsed = shlex.split(raw, posix=True)
+        except ValueError:
+            parsed = []
+        # Config values are scalar. Fail closed on malformed/multiword values;
+        # shell-quoted whitespace remains one scalar.
+        if len(parsed) == 1:
+            d[k.strip()] = parsed[0]
+        elif raw in ("", "''", '""'):
+            d[k.strip()] = ""
     return d
 
 
@@ -351,7 +361,7 @@ def gather(proj):
         return None, f"cannot resolve GitHub repo ({err}) — skipped"
 
     prs, err = gh_json(["pr", "list", "-R", slug, "--state", "open", "--json",
-                        "number,title,headRefName,headRefOid,baseRefName,isDraft,url"], timeout=30)
+                        "number,title,headRefName,headRefOid,baseRefName,baseRefOid,isDraft,url,mergeable,mergeStateStatus"], timeout=30)
     if prs is None:
         return None, f"gh pr list failed ({err}) — skipped"
     for pr in prs:
@@ -466,15 +476,17 @@ def desired_actions(proj, facts):
     out = {}
     for pr in facts["prs"]:
         if (pr["isDraft"] or pr["baseRefName"] != proj["trunk"]
+                or pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") != "CLEAN"
                 or pr["verdict"] != "green" or not pr["review_ready"]):
             continue
         # Bind approval to the exact reviewed head. A new commit supersedes the
         # old action and requires a fresh operator-facing ask.
-        key = f"merge:{pr['number']}:{pr['headRefOid']}"
+        key = f"merge:{pr['number']}:{pr['headRefOid']}:{pr['baseRefOid']}"
         note = f" ({pr['review_detail']})"
         out[key] = {
             "kind": "merge", "pr": pr["number"], "branch": pr["headRefName"],
-            "head_sha": pr["headRefOid"], "title": pr["title"][:60], "url": pr["url"],
+            "head_sha": pr["headRefOid"], "base_sha": pr["baseRefOid"],
+            "title": pr["title"][:60], "url": pr["url"],
             "desc": f"merge PR #{pr['number']} “{pr['title'][:48]}” into "
                     f"{proj['trunk']}{note}, then delete {pr['headRefName']}",
             "button": f"✅ Merge PR #{pr['number']}: {pr['title'][:28]}",
@@ -509,7 +521,8 @@ def sweep(dry=False):
             red = [p for p in facts["prs"] if p["verdict"] == "red"]
             pend = [p for p in facts["prs"] if p["verdict"] in ("pending", "missing-required", "no-ci", "unavailable")]
             wrong_base = [p for p in facts["prs"] if p["baseRefName"] != proj["trunk"]]
-            review_blocked = [p for p in facts["prs"] if p["baseRefName"] == proj["trunk"] and p["verdict"] == "green" and not p["review_ready"]]
+            merge_blocked = [p for p in facts["prs"] if p["baseRefName"] == proj["trunk"] and (p.get("mergeable") != "MERGEABLE" or p.get("mergeStateStatus") != "CLEAN")]
+            review_blocked = [p for p in facts["prs"] if p["baseRefName"] == proj["trunk"] and p.get("mergeable") == "MERGEABLE" and p.get("mergeStateStatus") == "CLEAN" and p["verdict"] == "green" and not p["review_ready"]]
             drafts = [p for p in facts["prs"] if p["isDraft"]]
             print(f"  repo {facts['slug']}: {len(facts['branches'])} branch(es), "
                   f"{len(facts['prs'])} open PR(s)")
@@ -519,6 +532,8 @@ def sweep(dry=False):
                 print(f"  ⏳ PR #{p['number']} CI {p['verdict']} ({p['verdict_detail']}) — {p['title'][:60]}")
             for p in wrong_base:
                 print(f"  ⛔ PR #{p['number']} targets {p['baseRefName']}, not protected trunk {proj['trunk']} — {p['title'][:60]}")
+            for p in merge_blocked:
+                print(f"  ⛔ PR #{p['number']} merge state {p.get('mergeStateStatus')} / {p.get('mergeable')} — refresh/update branch first")
             for p in review_blocked:
                 print(f"  ⛔ PR #{p['number']} reviewer gate blocked ({p['review_detail']}) — {p['title'][:60]}")
             for p in drafts:
@@ -546,7 +561,7 @@ def sweep(dry=False):
                 actions.append((aid, a))
 
             if not actions:
-                if red or pend or wrong_base or review_blocked:
+                if red or pend or wrong_base or merge_blocked or review_blocked:
                     all_clean = False
                     print("  no approvals needed (CI/reviewer-blocked PRs ride the coder loop)")
                 else:
@@ -583,7 +598,7 @@ def sweep(dry=False):
             for aid, a in shown:
                 lines.append(action_explainer(a))
                 lines.append("")
-            if red or pend or wrong_base or review_blocked:
+            if red or pend or wrong_base or merge_blocked or review_blocked:
                 aware = []
                 for p in red:
                     aware.append(f"   • PR #{p['number']} CI is RED — {p['title'][:50]} "
@@ -594,6 +609,9 @@ def sweep(dry=False):
                 for p in wrong_base:
                     aware.append(f"   • PR #{p['number']} targets {p['baseRefName']}, not protected trunk {proj['trunk']} "
                                  f"(not merge-actionable)")
+                for p in merge_blocked:
+                    aware.append(f"   • PR #{p['number']} merge state is {p.get('mergeStateStatus')} / {p.get('mergeable')} "
+                                 f"(update/reconcile before approval)")
                 for p in review_blocked:
                     aware.append(f"   • PR #{p['number']} reviewer gate blocked — {p['review_detail']} "
                                  f"(model-reported evidence is a trust limit, not proof)")
@@ -744,7 +762,7 @@ def execute(a, proj):
 
     if a["kind"] == "merge":
         pr, err = gh_json(["pr", "view", str(a["pr"]), "-R", slug, "--json",
-                           "state,isDraft,headRefName,headRefOid,baseRefName,title,url"], timeout=25)
+                           "state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,title,url,mergeable,mergeStateStatus"], timeout=25)
         if pr is None:
             return f"could not re-verify PR #{a['pr']} ({err})", False
         if pr["state"] != "OPEN" or pr["isDraft"]:
@@ -753,6 +771,10 @@ def execute(a, proj):
             return f"PR #{a['pr']} now targets {pr['baseRefName']}, not protected trunk {trunk} — not merging", False
         if pr["headRefName"] != a["branch"] or pr["headRefOid"] != a.get("head_sha"):
             return f"PR #{a['pr']} head changed after approval — run a fresh gate sweep", False
+        if pr["baseRefOid"] != a.get("base_sha"):
+            return f"protected trunk advanced after approval — update/recheck PR #{a['pr']} and run a fresh gate sweep", False
+        if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") != "CLEAN":
+            return f"PR #{a['pr']} merge state is {pr.get('mergeStateStatus')} / {pr.get('mergeable')} — not merging", False
         verdict, detail = pr_checks_verdict(slug, a["pr"], proj["required_checks"])
         review_ready, review_detail = reviewer_gate(slug, a["pr"], pr["headRefOid"])
         if verdict != "green":

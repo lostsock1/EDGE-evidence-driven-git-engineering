@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Validate a project's model-authored Superior Architecture artifact.
 
-This validator never invents product definitions or architecture prose. In heartbeat
-mode it emits a synthesis prompt only when an authoritative north-star spec exists.
+The validator checks structure, source traceability, age, and a SHA-256 binding to
+its north-star input. It never generates product or architecture prose. Heartbeat
+mode emits a synthesis instruction only when operator authority is explicitly
+attested in the spec metadata; that attestation is not created by this script.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -33,29 +36,66 @@ def parse_frontmatter(text: str) -> dict[str, str]:
     return values
 
 
-def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], list[str], Path, Path, bool]:
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def spec_status(text: str) -> tuple[bool, bool, str]:
+    """Return (structurally_valid, operator_attested, reason)."""
+    fm = parse_frontmatter(text)
+    substantive = len(text.strip()) >= 500
+    placeholder = any(re.search(p, text, re.I | re.M) for p in (r"\{\{", r"YYYY-MM-DD", r"<project"))
+    typed = fm.get("type", "").lower() == "north-star-spec"
+    legacy_shape = bool(
+        re.search(r"^#\s+.+North[ -]Star Specification\s*$", text, re.I | re.M)
+        and re.search(r"\*\*Status:\*\*\s*North-star specification", text, re.I)
+    )
+    valid = substantive and not placeholder and (typed or legacy_shape)
+    authority = fm.get("authority", "").lower() in {"operator", "operator-supplied", "operator-approved"}
+    if not substantive:
+        reason = "too short"
+    elif placeholder:
+        reason = "contains template placeholders"
+    elif not (typed or legacy_shape):
+        reason = "missing north-star-spec type/title and status provenance"
+    else:
+        reason = "ok"
+    return valid, authority, reason
+
+
+def validate(
+    workspace: Path, slug: str, max_age_days: int
+) -> tuple[list[str], list[str], Path, Path, bool, bool]:
     notes = workspace / "projects" / slug / "notes"
     spec = notes / f"{slug}-north-star.md"
     arch = notes / "SUPERIOR_ARCHITECTURE.md"
     blockers: list[str] = []
     warnings: list[str] = []
 
-    candidates = [p for p in notes.glob("*.md") if "north" in p.name.lower() and "star" in p.name.lower() and p.name.lower() != "superior_architecture.md"] if notes.exists() else []
+    candidates = [
+        p for p in notes.glob("*.md")
+        if "north" in p.name.lower() and "star" in p.name.lower()
+        and p.name.lower() != "superior_architecture.md"
+    ] if notes.exists() else []
     spec_valid = False
+    spec_authorized = False
+    spec_text = ""
     if not spec.is_file():
         blockers.append(f"missing authoritative spec: {spec}")
         if candidates:
-            blockers.append("north-star filename inconsistency: expected " + spec.name + "; found " + ", ".join(p.name for p in candidates))
+            blockers.append(
+                "north-star filename inconsistency: expected " + spec.name
+                + "; found " + ", ".join(p.name for p in candidates)
+            )
     else:
         spec_text = spec.read_text(errors="replace")
-        if len(spec_text.strip()) < 500 or any(re.search(p, spec_text, re.I | re.M) for p in (r"\{\{", r"YYYY-MM-DD", r"<project")):
-            blockers.append("authoritative spec is empty, too short, or still contains template placeholders")
-        else:
-            spec_valid = True
+        spec_valid, spec_authorized, reason = spec_status(spec_text)
+        if not spec_valid:
+            blockers.append(f"north-star spec is not structurally eligible: {reason}")
 
     if not arch.is_file():
         blockers.append(f"missing Superior Architecture: {arch}")
-        return blockers, warnings, spec, arch, spec_valid
+        return blockers, warnings, spec, arch, spec_valid, spec_authorized
 
     text = arch.read_text(errors="replace")
     fm = parse_frontmatter(text)
@@ -65,10 +105,17 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
     if len(text.strip()) < 1500:
         blockers.append("Superior Architecture is too short to be a substantive synthesis")
 
+    # A sources declaration is not evidence by itself. Require concrete rows,
+    # then verify resolvable S-label / local-Markdown tokens named in frontmatter.
     sources = fm.get("sources", "")
-    source_rows = re.findall(r"^\|\s*S?\d+\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", text, re.M)
-    if sources in ("", "[]") and not source_rows:
-        blockers.append("sources are missing (frontmatter sources and Sources index are empty)")
+    source_rows = re.findall(r"^\|\s*(S?\d+)\s*\|\s*(?!…|—|\s*\|)(.+?)\s*\|", text, re.M)
+    if not source_rows:
+        blockers.append("Sources index has no concrete source rows")
+    source_index_text = "\n".join(f"{label} {entry}" for label, entry in source_rows)
+    declared = set(re.findall(r"\bS\d+\b|[A-Za-z0-9_.-]+\.md", sources))
+    unresolved = sorted(token for token in declared if token not in source_index_text)
+    if unresolved:
+        blockers.append("frontmatter sources missing from Sources index: " + ", ".join(unresolved))
 
     versions = re.findall(r"^\|\s*v\d+(?:\.\d+)*\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|", text, re.M)
     if not versions:
@@ -87,26 +134,20 @@ def validate(workspace: Path, slug: str, max_age_days: int) -> tuple[list[str], 
         elif age > max_age_days:
             blockers.append(f"Superior Architecture is stale: updated {age} days ago (limit {max_age_days})")
 
-        # Filesystem mtimes change on copy/clone and are not evidence dates.
-        # Compare only explicitly named local Markdown sources that themselves
-        # declare a concrete frontmatter `updated` date.
-        local_names = set(re.findall(r"[A-Za-z0-9_.-]+\.md", sources))
-        local_names.add(spec.name)
-        newer = []
-        for name in sorted(local_names):
-            source = notes / name
-            if source == arch or not source.is_file():
-                continue
-            source_updated = parse_frontmatter(source.read_text(errors="replace")).get("updated", "")
-            try:
-                source_date = dt.date.fromisoformat(source_updated)
-            except ValueError:
-                continue
-            if source_date > updated_date:
-                newer.append(name)
-        if newer:
-            blockers.append("authoritative inputs newer than synthesis: " + ", ".join(newer))
-    return blockers, warnings, spec, arch, spec_valid
+    # Bind synthesis to the exact product-authority bytes. Filesystem mtimes are
+    # unusable after clone/copy; the hash deterministically catches spec drift.
+    expected_hash = fm.get("north_star_sha256", "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        blockers.append("frontmatter north_star_sha256 must bind the exact north-star spec bytes")
+    elif spec_text:
+        actual_hash = sha256_text(spec_text)
+        if expected_hash != actual_hash:
+            blockers.append(
+                "north-star spec changed after synthesis: expected sha256 "
+                f"{expected_hash}, got {actual_hash}"
+            )
+
+    return blockers, warnings, spec, arch, spec_valid, spec_authorized
 
 
 def main() -> int:
@@ -116,16 +157,26 @@ def main() -> int:
     parser.add_argument("--max-age-days", type=int, default=45)
     parser.add_argument("--heartbeat", action="store_true", help="emit a safe model-synthesis instruction when appropriate")
     args = parser.parse_args()
-    blockers, warnings, spec, arch, spec_valid = validate(args.workspace, args.project, args.max_age_days)
+    blockers, warnings, spec, arch, spec_valid, spec_authorized = validate(
+        args.workspace, args.project, args.max_age_days
+    )
     for warning in warnings:
         print(f"WARNING: {warning}")
     if blockers:
         for blocker in blockers:
             print(f"BLOCKED: {blocker}")
-        if args.heartbeat and spec_valid:
-            print(f"MODEL_ACTION: Read {spec} and authoritative project evidence, then author {arch}; do not invent missing product definitions or sources.")
+        if args.heartbeat and spec_valid and spec_authorized:
+            print(
+                f"MODEL_ACTION: Read {spec} and authoritative project evidence, compute "
+                f"north_star_sha256, then author {arch}; do not invent missing product definitions or sources."
+            )
+        elif args.heartbeat and spec_valid and not spec_authorized:
+            print(
+                "AUTHORITY_REQUIRED: operator must attest the canonical spec with "
+                "frontmatter authority: operator-supplied; agents must not create that attestation"
+            )
         return 1
-    print(f"PASS: {arch} is substantive, sourced, versioned, and fresh")
+    print(f"PASS: {arch} is substantive, source-indexed, versioned, fresh, and bound to its north-star SHA-256")
     return 0
 
 
