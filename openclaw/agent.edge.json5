@@ -28,12 +28,13 @@
     fallbacks: [],
   },
 
-  // "gate" registers the /gate slash command (the PR-gate skill in
-  // openclaw/skills/gate/) and "research" the /research command (the
-  // OpenScience dispatch skill in openclaw/skills/research/); keep them here
-  // or the agent can't invoke them, since a per-agent skills[] list is an
-  // allowlist that replaces the defaults.
-  skills: ["github", "gh-issues", "gate", "research"],
+  // These three register the slash commands the loop's inline buttons fire:
+  // "gate" → /gate (PR-gate skill, openclaw/skills/gate/), "research" →
+  // /research (OpenScience dispatch, openclaw/skills/research/), "dispatch" →
+  // /dispatch (coder-run follow-ups, openclaw/skills/dispatch/). Keep all three
+  // — a per-agent skills[] list is an allowlist that REPLACES the defaults, so
+  // dropping one turns every button that fires it into a dead tap.
+  skills: ["github", "gh-issues", "gate", "research", "dispatch"],
   // Let the research agent spawn sub-agent sessions (e.g. large web-research
   // fan-outs in a clean context).
   subagents: { allowAgents: ["*"] },

@@ -20,6 +20,28 @@
 #                     default 3600s). Set RDD_WORK_TO_FG to fit your exec-timeout.
 #   status:           show lock holder + recent runs.
 #
+# READ-ONLY / FOLLOW-UP SUBCOMMANDS (the chat-button surface — see BUTTONS below)
+#   list                  recent runs, one line each, with their last known state.
+#   log <run-id>          tail that run's full output.
+#   diff <run-id>         commits + files that run changed.
+#   ci <run-id>           current CI verdict for that run's PR.
+#   health                probe every model tier and report which are alive.
+#   retry <run-id>        re-dispatch that run's ORIGINAL task, same project.
+#   fix <run-id>          dispatch "make CI pass" against that run's PR.
+# retry/fix re-exec this script with the run's own project config, so a button
+# tapped in a chat thread lands back in the right repo without the operator
+# having to name it.
+#
+# BUTTONS: every message this script posts carries the next steps of the loop as
+# inline buttons. Telegram caps callback_data at 64 bytes and a command button is
+# encoded as "tgcmd:<command>", so a command over TG_CMD_MAX_BYTES (58) is
+# silently DROPPED by the channel adapter — no error, no log, the button just
+# never appears. Run ids are ~25 chars precisely so every command here fits;
+# send_tg refuses and logs an over-budget button rather than posting an
+# invisible one. Only "command" actions survive the round trip: a "callback"
+# action becomes an opaque tgcb1: payload that the Telegram handler drops when
+# no plugin claims it.
+#
 # CONFIGURATION — layered at startup:
 #   ~/.config/edge-rdd/config.env (shared model/timeout/variant policy), then
 #   $EDGE_RDD_CONFIG or RDD_DEFAULT_PROJECT_CONFIG (project identity overlay).
@@ -58,13 +80,25 @@
 #   - Permissions stay ON — never --dangerously-skip-permissions.
 #
 # Usage:  edge-coder-run.sh [--dir <repo_root>] [--fg] '<promoted implementation task>'
-#         edge-coder-run.sh status
+#         edge-coder-run.sh status | list | health
+#         edge-coder-run.sh log|diff|ci|retry|fix <run-id>
 # Log:    $RDD_LOG                (dispatch ledger)
 #         $RDD_RUNS_DIR/<id>.log  (full per-run output)
 
 set -uo pipefail
 # Source OpenClaw .env so provider API keys reach opencode.
 [ -f "$HOME/.openclaw/.env" ] && source "$HOME/.openclaw/.env"
+
+# Named subcommands are recognised BEFORE any config/guard logic so that both
+# the read-only ones and the re-dispatching ones stay callable with no project
+# overlay selected — a chat button carries only a run id, and the run's own
+# config is recovered from its .meta file. Keep this list as the single place
+# subcommands are declared: guards and dispatch both read SUBCMD, so adding a
+# verb here can never leave a guard behind that rejects it.
+SUBCMD=""
+case "${1:-}" in
+  status|ci-verdict|list|log|diff|ci|health|retry|fix) SUBCMD="$1" ;;
+esac
 
 # ---- configuration --------------------------------------------------------
 # config.env owns shared runtime policy (models/timeouts/variants). A selected
@@ -150,10 +184,87 @@ HAVE_GH=1
   echo "[$(ts)] WARN gh/jq not found — PR lookup and CI watching disabled" >> "$LOG"
 }
 
-send_tg() { # send_tg "<message>"  (best-effort; EDGE_CODER_DRYRUN_MSG=1 prints instead)
-  local msg="$1"
+# ---- run metadata -----------------------------------------------------------
+# One .meta per run, so a message posted hours ago still knows which project,
+# repo, task and PR it belongs to. This is what lets a button carry nothing but
+# a run id. Values are single-line; the task (which may be long and contain
+# anything) is base64'd. Read back with a strict key lookup — never sourced, so
+# nothing in here is ever evaluated as shell.
+meta_file() { printf '%s/%s.meta\n' "$RUNS_DIR" "$1"; }
+
+meta_set() { # meta_set <run-id> <key> <value>
+  local f; f="$(meta_file "$1")"
+  local key="$2" val="$3" tmp
+  tmp="$(mktemp "${f}.XXXXXX")" || return 1
+  [ -f "$f" ] && grep -v "^${key}=" "$f" >> "$tmp" 2>/dev/null
+  printf '%s=%s\n' "$key" "${val//$'\n'/ }" >> "$tmp"
+  mv -f "$tmp" "$f"
+}
+
+meta_get() { # meta_get <run-id> <key>  -> value on stdout ("" when absent)
+  local f; f="$(meta_file "$1")"
+  [ -f "$f" ] || return 0
+  local line; line="$(grep -m1 "^${2}=" "$f" 2>/dev/null)" || return 0
+  printf '%s\n' "${line#*=}"
+}
+
+meta_task() { # meta_task <run-id> -> the original task text
+  local b64; b64="$(meta_get "$1" task_b64)"
+  [ -n "$b64" ] && printf '%s' "$b64" | base64 -d 2>/dev/null
+}
+
+valid_run_id() { [[ "$1" =~ ^run-[0-9]{8}-[0-9]{6}-[0-9]+$ ]]; }
+
+# ---- chat delivery ----------------------------------------------------------
+# Telegram callback_data is capped at 64 bytes; a command button is encoded as
+# "tgcmd:<command>" (6-byte prefix), leaving 58 for the command itself. Over
+# that, the channel adapter's sanitizer returns undefined and the button is
+# dropped from the keyboard with no error anywhere — the operator just sees a
+# message with a missing option. Refuse loudly here instead.
+TG_CMD_MAX_BYTES=58
+
+send_tg() { # send_tg "<message>" [<label>$'\t'<action> …]
+  # action is either a slash command ("/dispatch log run-…") or "url:<https…>".
+  # URL buttons carry no callback_data, so they are exempt from the byte cap.
+  local msg="$1"; shift
+  local -a btns=("$@")
+  local -a keep=()
+  local b label action
+  for b in "${btns[@]}"; do
+    [ -n "$b" ] || continue
+    label="${b%%$'\t'*}"; action="${b#*$'\t'}"
+    if [[ "$action" != url:* ]] && [ "$(printf '%s' "$action" | wc -c)" -gt "$TG_CMD_MAX_BYTES" ]; then
+      echo "[$(ts)] WARN button dropped, command over ${TG_CMD_MAX_BYTES}B (Telegram would drop it silently): $action" >> "$LOG"
+      continue
+    fi
+    keep+=("$b")
+  done
+  local presentation=""
+  if [ "${#keep[@]}" -gt 0 ]; then
+    presentation="$(printf '%s\n' "${keep[@]}" | python3 -c '
+import json, sys
+blocks = []
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    label, _, action = line.partition("\t")
+    if action.startswith("url:"):
+        btn = {"label": label, "action": {"type": "url", "url": action[4:]}}
+    else:
+        # Only "command" actions survive: a "callback" action is encoded as an
+        # opaque tgcb1: payload that the Telegram handler drops when no plugin
+        # claims it, so the tap would do nothing at all.
+        btn = {"label": label, "action": {"type": "command", "command": action}}
+    # One button per block = one per row. Telegram packs 3 per row within a
+    # block, which truncates these long self-explaining labels.
+    blocks.append({"type": "buttons", "buttons": [btn]})
+print(json.dumps({"blocks": blocks}))
+')" || presentation=""
+  fi
   if [ "${EDGE_CODER_DRYRUN_MSG:-0}" = "1" ]; then
-    printf 'DRYRUN-TG >>>\n%s\n<<< DRYRUN-TG\n' "$msg"
+    printf 'DRYRUN-TG >>>\n%s\n' "$msg"
+    for b in "${keep[@]}"; do printf '  [button] %s  ->  %s\n' "${b%%$'\t'*}" "${b#*$'\t'}"; done
+    printf '<<< DRYRUN-TG\n'
     return 0
   fi
   if [ -z "$NUDGE_TARGET" ]; then
@@ -162,8 +273,45 @@ send_tg() { # send_tg "<message>"  (best-effort; EDGE_CODER_DRYRUN_MSG=1 prints 
   fi
   local -a thread_args=()
   [ -n "$NUDGE_THREAD" ] && thread_args=(--thread-id "$NUDGE_THREAD")
+  local -a pres_args=()
+  [ -n "$presentation" ] && pres_args=(--presentation "$presentation")
   timeout 60 "$OCLI" message send --channel "$NUDGE_CHANNEL" --target "$NUDGE_TARGET" \
-    "${thread_args[@]}" --message "$msg" >>"$LOG" 2>&1
+    "${thread_args[@]}" --message "$msg" "${pres_args[@]}" >>"$LOG" 2>&1
+}
+
+probe_model() { # probe_model <model> <timeout> <variant> <cwd> -> prints reply, rc 0 = alive
+  # A tier is "alive" only if it streams real text within the budget. Shared by
+  # the dispatch ladder and the `health` subcommand so the two can never
+  # disagree about what a working tier looks like.
+  local m="$1" to="$2" v="$3" cwd="$4"
+  local -a variant_args=()
+  if [ -n "$v" ] && [ "$v" != "default" ] && [ "$v" != "-" ]; then
+    variant_args=(--variant "$v")
+  fi
+  { cd "$cwd" && \
+    timeout --signal=TERM --kill-after=10 "$to" \
+    "$OPENCODE" run --format json --model "$m" "${variant_args[@]}" --agent "$AGENT" "say hello"; } 2>/dev/null | \
+    python3 -c '
+import sys, json
+texts = []
+has_text = False
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if e.get("type") == "text":
+        has_text = True
+        t = e.get("text") or e.get("part", {}).get("text")
+        if t:
+            texts.append(t)
+if not has_text or not "".join(texts).strip():
+    sys.exit(1)
+print("".join(texts))
+'
 }
 
 strict_ci_verdict() { # strict_ci_verdict '<checks-json>' -> verdict<TAB>detail
@@ -238,6 +386,131 @@ if [ "${1:-}" = "ci-verdict" ]; then
   # for regression tests. RDD_REQUIRED_CHECKS still applies.
   strict_ci_verdict "${2:-[]}"
   exit 0
+fi
+
+# ---- follow-up subcommands (the chat-button surface) -------------------------
+# Everything below answers "what now?" for a run that already happened. They are
+# reached from inline buttons carrying only a run id, so each one resolves the
+# project itself from that run's .meta rather than trusting ambient config.
+need_run_id() { # need_run_id <verb> <arg> -> echoes the id, or exits 2
+  if [ -z "${1:-}" ] || ! valid_run_id "$1"; then
+    echo "usage: edge-coder-run.sh $2 <run-id>   (see: edge-coder-run.sh list)" >&2
+    exit 2
+  fi
+  if [ ! -f "$(meta_file "$1")" ] && [ ! -f "$RUNS_DIR/$1.log" ]; then
+    echo "unknown run: $1   (see: edge-coder-run.sh list)" >&2
+    exit 4
+  fi
+  printf '%s\n' "$1"
+}
+
+if [ "$SUBCMD" = "list" ]; then
+  echo "=== recent dispatches ==="
+  # Newest first. A run with no .meta predates this bookkeeping — still listed,
+  # just without the project/PR columns, so old ids never look like corruption.
+  ls -t "$RUNS_DIR"/*.log 2>/dev/null | head -15 | while read -r f; do
+    rid="$(basename "$f" .log)"
+    valid_run_id "$rid" || continue
+    proj="$(meta_get "$rid" project)"; pr="$(meta_get "$rid" pr)"
+    br="$(meta_get "$rid" branch)"; verdict="$(meta_get "$rid" ci_verdict)"
+    printf '%s  %s%s%s%s\n' "$rid" \
+      "${proj:-?}" "${br:+  branch $br}" "${pr:+  PR #$pr}" "${verdict:+  CI $verdict}"
+  done
+  exit 0
+fi
+
+if [ "$SUBCMD" = "log" ]; then
+  rid="$(need_run_id "${2:-}" log)" || exit $?
+  f="$RUNS_DIR/$rid.log"
+  if [ ! -f "$f" ]; then echo "no output log for $rid" >&2; exit 4; fi
+  echo "=== $rid — last ${RDD_LOG_TAIL:-120} lines of $f ==="
+  tail -n "${RDD_LOG_TAIL:-120}" "$f"
+  exit 0
+fi
+
+if [ "$SUBCMD" = "diff" ]; then
+  rid="$(need_run_id "${2:-}" diff)" || exit $?
+  rdir="$(meta_get "$rid" dir)"; before="$(meta_get "$rid" head_before)"
+  after="$(meta_get "$rid" head_after)"
+  if [ -z "$rdir" ] || [ -z "$before" ] || [ -z "$after" ]; then
+    echo "$rid has no recorded commit range (run predates run metadata, or it never committed)." >&2
+    exit 4
+  fi
+  if [ "$before" = "$after" ]; then echo "$rid made no commits."; exit 0; fi
+  echo "=== $rid — $before..$after in $rdir ==="
+  git -C "$rdir" log --oneline "$before..$after" 2>&1 | head -20
+  echo "--- files changed ---"
+  git -C "$rdir" diff --stat "$before..$after" 2>&1 | tail -25
+  exit 0
+fi
+
+if [ "$SUBCMD" = "ci" ]; then
+  rid="$(need_run_id "${2:-}" ci)" || exit $?
+  pr="$(meta_get "$rid" pr)"; rdir="$(meta_get "$rid" dir)"
+  if [ -z "$pr" ]; then echo "$rid has no PR to check."; exit 0; fi
+  if [ "$HAVE_GH" != 1 ]; then echo "gh/jq unavailable — cannot read CI." >&2; exit 4; fi
+  checks="$(cd "$rdir" 2>/dev/null && timeout 25 gh pr checks "$pr" --json name,bucket 2>/dev/null)"
+  state="$(strict_ci_verdict "${checks:-[]}")"
+  echo "PR #$pr — CI ${state%%$'\t'*}: ${state#*$'\t'}"
+  [ -n "$(meta_get "$rid" pr_url)" ] && echo "$(meta_get "$rid" pr_url)"
+  exit 0
+fi
+
+if [ "$SUBCMD" = "health" ]; then
+  # Probe each configured tier the same way a dispatch would, so "which models
+  # are actually alive right now" is answerable without burning a real run.
+  # opencode needs a real repo as cwd — never $HOME, where a stray .git makes it
+  # snapshot-walk the entire home directory. Take it from the named run, else
+  # from the selected project config.
+  probe_dir="${DIR:-}"
+  if [ -n "${2:-}" ] && valid_run_id "$2"; then probe_dir="$(meta_get "$2" dir)"; fi
+  if [ -z "$probe_dir" ] || [ ! -d "$probe_dir/.git" ]; then
+    echo "health needs a repo to probe from. Pass a run id (edge-coder-run.sh health <run-id>)" >&2
+    echo "or select a project config: EDGE_RDD_CONFIG=/path/to/project.env" >&2
+    exit 2
+  fi
+  if [ "${#MODELS[@]}" -eq 0 ]; then echo "no RDD_MODELS configured." >&2; exit 2; fi
+  echo "=== model tier health (probe only, no work dispatched) ==="
+  i=0
+  for m in "${MODELS[@]}"; do
+    to="${TIMEOUTS_FG[$i]:-60}"; v="${VARIANTS[$i]:-}"
+    start=$(date +%s)
+    if probe_model "$m" "$to" "$v" "$probe_dir" >/dev/null 2>&1; then
+      echo "  ✅ $m${v:+ ($v)} — answered in $(( $(date +%s) - start ))s"
+    else
+      echo "  ❌ $m${v:+ ($v)} — no answer within ${to}s"
+    fi
+    i=$((i+1))
+  done
+  echo "(a ❌ here means the tier is skipped, not that a dispatch fails — the ladder falls through to the next one.)"
+  exit 0
+fi
+
+if [ "$SUBCMD" = "retry" ] || [ "$SUBCMD" = "fix" ]; then
+  rid="$(need_run_id "${2:-}" "$SUBCMD")" || exit $?
+  rcfg="$(meta_get "$rid" config)"
+  if [ -z "$rcfg" ] || [ ! -f "$rcfg" ]; then
+    echo "$rid has no usable project config recorded — dispatch it manually." >&2
+    exit 4
+  fi
+  if [ "$SUBCMD" = "retry" ]; then
+    newtask="$(meta_task "$rid")"
+    if [ -z "$newtask" ]; then
+      echo "$rid has no recorded task to retry — dispatch it manually." >&2
+      exit 4
+    fi
+  else
+    pr="$(meta_get "$rid" pr)"
+    if [ -z "$pr" ]; then
+      echo "$rid has no PR, so there is no failing CI to fix. Use retry to run the original task again." >&2
+      exit 4
+    fi
+    # Deep effort: a red CI on work the coder itself wrote is a diagnosis job,
+    # not a typo fix. The original task is restated so the fixer knows intent.
+    newtask="[effort=deep] The CI checks on PR #$pr are failing. Check out that PR's branch, read the failing check logs, find the root cause, and push a fix so every required check passes. Do not open a new PR — push to the existing branch. The original task was: $(meta_task "$rid")"
+  fi
+  echo "re-dispatching ($SUBCMD) from $rid using config $rcfg"
+  EDGE_RDD_CONFIG="$rcfg" exec "$0" "$newtask"
 fi
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -477,30 +750,7 @@ existing progress.
     echo "[$(ts)] TRY model=$M variant=${V:-default} timeout=${TO}s" >> "$LOG"
     # --- Liveness probe first: short prompt, short timeout ---
     echo "[$(ts)] PROBE model=$M" >> "$LOG"
-    PROBE_OUT="$( { cd "$DIR" && \
-      timeout --signal=TERM --kill-after=10 "$TO" \
-      "$OPENCODE" run --format json --model "$M" "${VARIANT_ARGS[@]}" --agent "$AGENT" "say hello"; } 2>/dev/null | \
-      python3 -c '
-import sys, json
-texts = []
-has_text = False
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        e = json.loads(line)
-    except Exception:
-        continue
-    if e.get("type") == "text":
-        has_text = True
-        t = e.get("text") or e.get("part", {}).get("text")
-        if t:
-            texts.append(t)
-if not has_text or not "".join(texts).strip():
-    sys.exit(1)
-print("".join(texts))
-')"
+    PROBE_OUT="$(probe_model "$M" "$TO" "$V" "$DIR")"
     PROBE_RC=$?
     if [ $PROBE_RC -ne 0 ]; then
       echo "[$(ts)] PROBE-FAIL model=$M rc=$PROBE_RC -> next tier" >> "$LOG"
@@ -575,10 +825,19 @@ print("".join(texts))
   if [ -z "$USED_MODEL" ]; then
     echo "[$(ts)] ALL MODELS FAILED id=${RUN_ID:-fg}" >> "$LOG"
     echo "edge-coder-run: all ${#MODELS[@]} model tiers failed (see $LOG)" >&2
+    meta_set "${RUN_ID:-fg}" outcome "all-tiers-failed"
     if [ "$MODE" = bg ]; then
-      send_tg "❌ coder dispatch ${RUN_ID} FAILED — all ${#MODELS[@]} model tiers down: ${FAIL_SUMMARY% → } ✗
-Task: ${TASK:0:160}…
-Log: $RUNS_DIR/${RUN_ID}.log"
+      send_tg "❌ Dispatch failed — none of the ${#MODELS[@]} model tiers would run it
+${FAIL_SUMMARY% → } ✗
+
+👉 What this means: no code was written and nothing was touched in the repo. Every model in the fallback ladder either refused, timed out, or ran out of quota, so the task never started. Your task is not lost — it is recorded and can be re-run as-is.
+👉 Recommended: check which tiers are alive first. If it is a quota or rate limit, waiting is usually enough; if a tier is down for good, the ladder in config.env needs reordering.
+
+Task: ${TASK:0:160}$([ "${#TASK}" -gt 160 ] && echo '…')
+Log: $RUNS_DIR/${RUN_ID}.log" \
+        "🩺 Which model tiers are alive?"$'\t'"/dispatch health $RUN_ID" \
+        "🔁 Try the same task again"$'\t'"/dispatch retry $RUN_ID" \
+        "📜 Show the full run log"$'\t'"/dispatch log $RUN_ID"
     fi
 
     return 1
@@ -685,20 +944,59 @@ Log: $RUNS_DIR/${RUN_ID}.log"
   echo "MODEL_USED=$USED_MODEL" >&2
   echo "VARIANT_USED=${USED_VARIANT:-default}" >&2
 
+  # Record what this run produced, so buttons on this message (and on the CI
+  # verdict that follows) can resolve the PR and commit range later.
+  meta_set "$RUN_ID" branch      "$branch"
+  meta_set "$RUN_ID" head_before "$HEAD_BEFORE"
+  meta_set "$RUN_ID" head_after  "$head_after"
+  meta_set "$RUN_ID" pr          "$pr_num"
+  meta_set "$RUN_ID" pr_url      "$pr_url"
+  meta_set "$RUN_ID" reviewer    "$REVIEWER_VERDICT"
+  meta_set "$RUN_ID" finished    "$(ts)"
+
+  local gate_ready=no
+  if [ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; }; then
+    gate_ready=yes
+  fi
+
   # Async completion push to the project thread (fg already shows all of this inline).
   if [ "$MODE" = bg ]; then
-    msg="✅ coder dispatch ${RUN_ID} done (opencode-configured model)
+    # Plain-language verdict first: the operator should learn what happened and
+    # what to do from the top three lines, without decoding trailer/reviewer
+    # jargon. The evidence block below it stays verbatim — it is what makes the
+    # claim checkable, and the terse fields are load-bearing for that.
+    local headline meaning recommend
+    if [ -n "$pr_url" ] && [ "$gate_ready" = yes ]; then
+      headline="✅ Coder finished — PR #${pr_num} is open"
+      meaning="the coder wrote the change, opened a PR, and its own reviewer passed. Nothing is merged and nothing reached ${MAIN_BRANCH} — a PR is just a proposal."
+      recommend="wait for CI. I'll post green or red here on its own, then the merge decision goes to the gate thread."
+    elif [ -n "$pr_url" ]; then
+      headline="⚠️ Coder finished — PR #${pr_num} is open but review did NOT pass"
+      meaning="the code exists and the PR is open, but the coder's reviewer came back '${REVIEWER_VERDICT}'. The gate will refuse to offer this for merge while that stands."
+      recommend="send it back to the coder to finish the review loop. Merging it needs a clean review first."
+    else
+      headline="⚠️ Coder finished — but no PR appeared"
+      meaning="the model reported it was done, yet no open PR exists for branch '${branch}'. That is either genuinely commitless work (docs-only edits can be) or the coder never pushed."
+      recommend="check what it actually changed. If the answer is 'nothing useful', send the task back."
+    fi
+    msg="$headline
+run ${RUN_ID}
+
+👉 What this means: $meaning
+👉 Recommended: $recommend
+
+--- evidence ---
 effort profile: ${EFFORT_PROFILE:-static}
 variant: ${USED_VARIANT:-default}"
     [ -n "$FAIL_SUMMARY" ] && msg="$msg
-fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}"
+fallback path: ${FAIL_SUMMARY}${USED_MODEL##*/}  (earlier tiers failed; this is the one that did the work)"
     msg="$msg
 branch: $branch
 PR: ${pr_url:-none}
 trailer: $TRAILER_OK (model-reported; parsed mechanically)
 reviewer: $REVIEWER_VERDICT (model-reported only; wrapper cannot prove reviewer execution)
 PR state: $([ -n "$pr_url" ] && echo "observed open PR" || echo "MISSING — no open PR observed; this is not a claim that model work failed")
-gate readiness: $([ "$TASK_CLASS" = trivial ] || { [ "$TRAILER_OK" = yes ] && [[ "$REVIEWER_VERDICT" = pass* ]]; } && echo eligible-for-CI-gate || echo BLOCKED-by-review)
+gate readiness: $([ "$gate_ready" = yes ] && echo eligible-for-CI-gate || echo BLOCKED-by-review)
 commits:
 ${commits}"
     [ -n "$open_reqs" ] && msg="$msg
@@ -706,7 +1004,14 @@ ${commits}"
 $open_reqs"
     msg="$msg
 full output: $RUNS_DIR/${RUN_ID}.log"
-    send_tg "$msg" && echo "[$(ts)] COMPLETION message sent id=${RUN_ID}" >> "$LOG"
+    local -a btns=()
+    [ -n "$pr_url" ] && btns+=("🔗 Open PR #${pr_num} on GitHub"$'\t'"url:$pr_url")
+    btns+=("📄 What did it actually change?"$'\t'"/dispatch diff $RUN_ID")
+    if [ -z "$pr_url" ] || [ "$gate_ready" != yes ]; then
+      btns+=("🔁 Send it back to the coder"$'\t'"/dispatch retry $RUN_ID")
+    fi
+    btns+=("📜 Show the full run log"$'\t'"/dispatch log $RUN_ID")
+    send_tg "$msg" "${btns[@]}" && echo "[$(ts)] COMPLETION message sent id=${RUN_ID}" >> "$LOG"
   elif [ -n "$open_reqs" ]; then
     # fg nudges only when a handoff needs attention.
     send_tg "coder: open blocking/high EDGE request(s) after a $branch dispatch — research handoff waiting in $DOCS_DIR/EDGE_COLLABORATION.md."
@@ -728,40 +1033,85 @@ full output: $RUNS_DIR/${RUN_ID}.log"
         ci_state="$(strict_ci_verdict "$checks")"
         ci_verdict="${ci_state%%$'\t'*}"
         ci_detail="${ci_state#*$'\t'}"
+        meta_set "$RUN_ID" ci_verdict "$ci_verdict"
         case "$ci_verdict" in
           pending|no-ci) continue ;;
           red)
-            send_tg "❌ PR #$pr_num CI: FAILED — $ci_detail
-$pr_url"
+            # Red CI is the single most actionable state in the loop and the one
+            # the operator should never have to hand-drive: one tap sends it back
+            # with the failure named. The exact task the coder would get is not
+            # restated here (it is long); the button label says what happens.
+            send_tg "❌ PR #$pr_num — CI FAILED
+$ci_detail
+
+👉 What this means: the change the coder wrote does not pass its own checks. Nothing merged, nothing reached $MAIN_BRANCH — the PR just sits there, red.
+👉 Recommended: send it back to the coder. It gets the failing check names and the original task, and pushes a fix to the same branch (no new PR).
+
+$pr_url" \
+              "🔁 Send it back to the coder"$'\t'"/dispatch fix $RUN_ID" \
+              "🔗 See the failing checks"$'\t'"url:$pr_url/checks" \
+              "📜 Show the full run log"$'\t'"/dispatch log $RUN_ID"
             echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
             exit 0
             ;;
           missing-required|unavailable)
-            send_tg "⛔ PR #$pr_num CI is not gate-ready — $ci_detail
-$pr_url"
+            send_tg "⛔ PR #$pr_num — CI is not gate-ready
+$ci_detail
+
+👉 What this means: the checks did not come back in a shape the gate can trust — a required check never reported, or GitHub would not tell us. This is not the same as failing; it is unknown, and unknown never gets offered for merge.
+👉 Recommended: look at the PR's checks tab. If a required check name changed, RDD_REQUIRED_CHECKS needs updating; if a run never started, re-running CI on GitHub is usually enough.
+
+$pr_url" \
+              "🔗 Open the checks tab"$'\t'"url:$pr_url/checks" \
+              "🔄 Re-read the CI verdict now"$'\t'"/dispatch ci $RUN_ID"
             echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
             exit 0
             ;;
           green)
             if [ "$TASK_CLASS" = nontrivial ] && { [ "$TRAILER_OK" != yes ] || [[ "$REVIEWER_VERDICT" != pass* ]]; }; then
-              send_tg "⛔ PR #$pr_num CI is green, but reviewer verdict is $REVIEWER_VERDICT — NOT gate-ready. This verdict is parsed from model output and cannot prove reviewer execution.
-$pr_url"
+              send_tg "⛔ PR #$pr_num — CI green, but the review gate is not satisfied
+reviewer verdict: $REVIEWER_VERDICT
+
+👉 What this means: the automated checks pass, but the coder's own reviewer did not come back with a pass. The gate deliberately will not offer this for merge — CI proves the tests ran, not that the change is right.
+👉 Recommended: send it back so the review loop actually completes. If you disagree and want it merged anyway, merge it yourself on GitHub — I will not route around the review gate.
+
+This verdict is parsed from model output and cannot prove reviewer execution.
+$pr_url" \
+                "🔁 Send it back to the coder"$'\t'"/dispatch retry $RUN_ID" \
+                "🔗 Open PR #$pr_num on GitHub"$'\t'"url:$pr_url" \
+                "📄 What did it actually change?"$'\t'"/dispatch diff $RUN_ID"
             else
-              send_tg "✅ PR #$pr_num CI: all checks green, all named contexts present; reviewer gate eligible — ready for human merge. Reviewer evidence is model-reported, not independently provable by the wrapper.
-$pr_url"
               # Trigger an immediate gate sweep so the merge button appears now,
               # without waiting for the next on-demand /gate sweep.
               if [ -x "$GATE_SCRIPT" ]; then
                 bash "$GATE_SCRIPT" sweep >>"$LOG" 2>&1 &
                 echo "[$(ts)] gate sweep triggered for PR#$pr_num" >> "$LOG"
               fi
+              send_tg "✅ PR #$pr_num — CI green, ready for your merge decision
+all checks passed, every required context reported, review gate eligible
+
+👉 What this means: this PR has cleared everything a machine can clear. The only thing left is you deciding it should be in $MAIN_BRANCH.
+👉 Recommended: the merge ask (with the merge button and a what/consequence/why brief) is being posted to the gate thread right now. Approve it there — that path re-verifies every gate at the moment you tap, so a stale approval can never merge.
+
+Reviewer evidence is model-reported, not independently provable by the wrapper.
+$pr_url" \
+                "🚦 Take me to the merge decision"$'\t'"/gate sweep" \
+                "🔗 Open PR #$pr_num on GitHub"$'\t'"url:$pr_url" \
+                "📄 What did it actually change?"$'\t'"/dispatch diff $RUN_ID"
             fi
             echo "[$(ts)] CI verdict sent PR#$pr_num verdict=$ci_verdict detail='$ci_detail'" >> "$LOG"
             exit 0
             ;;
         esac
       done
-      send_tg "⏳ PR #$pr_num CI: no complete gate-ready verdict after $((CI_POLL_SECS*CI_POLL_MAX/60)) min (pending or no checks reported) — check manually: $pr_url"
+      send_tg "⏳ PR #$pr_num — CI still had no verdict after $((CI_POLL_SECS*CI_POLL_MAX/60)) min
+
+👉 What this means: I stopped watching, not because something failed, but because the checks were still pending (or none reported) for longer than I wait. The PR is untouched.
+👉 Recommended: check once more now — if CI has since finished, the verdict below tells you where it landed.
+
+$pr_url" \
+        "🔄 Check the CI verdict now"$'\t'"/dispatch ci $RUN_ID" \
+        "🔗 Open PR #$pr_num on GitHub"$'\t'"url:$pr_url"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
   fi
@@ -799,6 +1149,16 @@ if [ "$MODE" = fg ]; then
 fi
 
 RUN_ID="run-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+# Record the run's identity NOW, before the worker detaches. Every button this
+# run's messages later carry resolves back through this file, so it has to exist
+# even if the worker dies before it can write anything else.
+meta_set "$RUN_ID" run_id  "$RUN_ID"
+meta_set "$RUN_ID" started "$(ts)"
+meta_set "$RUN_ID" config  "$CONFIG"
+meta_set "$RUN_ID" dir     "$DIR"
+meta_set "$RUN_ID" project "${RDD_PROJECT_NAME:-${RDD_PROJECT_SLUG:-$(basename "$DIR")}}"
+meta_set "$RUN_ID" effort  "${EFFORT_PROFILE:-static}"
+meta_set "$RUN_ID" task_b64 "$(printf '%s' "$TASK" | base64 -w0)"
 echo "pid=parent started=$(ts) mode=bg id=$RUN_ID effort=${EFFORT_PROFILE:-static} task=${TASK:0:80}" > "$LOCK.holder"
 # Isolate the background worker in its own transient systemd scope so a heavy
 # build (opencode + a pip install + qmd) gets a dedicated cgroup and memory

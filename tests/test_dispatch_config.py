@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -243,6 +245,123 @@ exit 0
             log = (root / "run.log").read_text()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("PARTIAL-WORK handoff", log)
+
+
+class ChatButtonTests(unittest.TestCase):
+    """The chat-button surface: run metadata, follow-up verbs, and the byte cap.
+
+    Telegram caps callback_data at 64 bytes and encodes a command button as
+    "tgcmd:<command>". Over that, the channel adapter drops the button with no
+    error anywhere — the operator just sees a message missing an option. These
+    tests fail at authoring time instead.
+    """
+
+    # "run-" + YYYYMMDD + "-" + HHMMSS + "-" + $RANDOM (max 32767, 5 digits)
+    LONGEST_RUN_ID = "run-20260721-035500-32767"
+    TG_CMD_MAX_BYTES = 58
+
+    def test_declared_cap_matches_telegram_limit(self):
+        # 64-byte callback_data minus the 6-byte "tgcmd:" prefix the Telegram
+        # adapter adds. If OpenClaw ever changes either, this is the tripwire.
+        src = SCRIPT.read_text()
+        self.assertIn(f"TG_CMD_MAX_BYTES={self.TG_CMD_MAX_BYTES}", src)
+
+    def test_every_button_command_fits_the_cap(self):
+        # Expand each literal command the script can emit at its worst case and
+        # assert it still fits, so a future longer verb cannot ship invisible.
+        src = SCRIPT.read_text()
+        commands = re.findall(r'\$\'\\t\'"(/[a-z]+ [^"]*)"', src)
+        self.assertTrue(commands, "no button commands found — did the quoting change?")
+        for cmd in commands:
+            expanded = cmd.replace("$RUN_ID", self.LONGEST_RUN_ID)
+            self.assertNotIn("$", expanded, f"unexpanded variable in button command: {cmd}")
+            self.assertLessEqual(
+                len(expanded.encode()), self.TG_CMD_MAX_BYTES,
+                f"button command would be silently dropped by Telegram: {expanded!r}")
+
+    def make_run(self, td, **meta):
+        root = Path(td)
+        runs = root / "runs"; runs.mkdir(parents=True, exist_ok=True)
+        rid = self.LONGEST_RUN_ID
+        (runs / f"{rid}.log").write_text("fake run output\n")
+        body = "".join(f"{k}={v}\n" for k, v in meta.items())
+        (runs / f"{rid}.meta").write_text(f"run_id={rid}\n{body}")
+        home = root / "home"; home.mkdir(exist_ok=True)
+        env = os.environ.copy()
+        env.pop("EDGE_RDD_CONFIG", None)
+        env.update({"HOME": str(home),
+                    "RDD_SHARED_CONFIG": str(root / "none.env"),
+                    "RDD_RUNS_DIR": str(runs),
+                    "RDD_LOG": str(root / "run.log"),
+                    "RDD_LOCKDIR": str(root / "locks")})
+        return rid, env
+
+    def run_verb(self, env, *args):
+        return subprocess.run([str(SCRIPT), *args], env=env, text=True, capture_output=True)
+
+    def test_follow_up_verbs_need_a_wellformed_run_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, env = self.make_run(td)
+            for verb in ("log", "diff", "ci", "retry", "fix"):
+                r = self.run_verb(env, verb, "; rm -rf /")
+                self.assertEqual(r.returncode, 2, f"{verb} accepted a malformed id")
+                self.assertIn("usage:", r.stderr)
+
+    def test_unknown_run_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, env = self.make_run(td)
+            r = self.run_verb(env, "log", "run-19990101-000000-1")
+            self.assertEqual(r.returncode, 4)
+            self.assertIn("unknown run", r.stderr)
+
+    def test_list_reports_recorded_project_and_pr(self):
+        with tempfile.TemporaryDirectory() as td:
+            rid, env = self.make_run(td, project="NAIRRATOR", branch="cm/x", pr="52")
+            r = self.run_verb(env, "list")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(rid, r.stdout)
+            self.assertIn("NAIRRATOR", r.stdout)
+            self.assertIn("PR #52", r.stdout)
+
+    def test_fix_refuses_without_a_pr(self):
+        with tempfile.TemporaryDirectory() as td:
+            rid, env = self.make_run(td, config=str(Path(td) / "none.env"))
+            Path(td, "none.env").write_text("")
+            r = self.run_verb(env, "fix", rid)
+            self.assertEqual(r.returncode, 4)
+            self.assertIn("no PR", r.stderr)
+
+    def test_retry_refuses_without_a_recorded_task(self):
+        with tempfile.TemporaryDirectory() as td:
+            rid, env = self.make_run(td, config=str(Path(td) / "none.env"))
+            Path(td, "none.env").write_text("")
+            r = self.run_verb(env, "retry", rid)
+            self.assertEqual(r.returncode, 4)
+            self.assertIn("no recorded task", r.stderr)
+
+    def test_task_survives_metadata_round_trip(self):
+        # The task is base64'd precisely because it may contain newlines, quotes
+        # and shell metacharacters; retry must hand back the original bytes.
+        task = 'fix "the" thing\nwith $VARS && `backticks`'
+        with tempfile.TemporaryDirectory() as td:
+            rid, env = self.make_run(
+                td, config=str(Path(td) / "proj.env"),
+                task_b64=base64.b64encode(task.encode()).decode())
+            # No RDD_REPO_DIR: retry re-execs and the dispatch guard stops it
+            # there, after the task has been recovered and echoed.
+            Path(td, "proj.env").write_text("")
+            r = self.run_verb(env, "retry", rid)
+            self.assertIn("re-dispatching (retry)", r.stdout)
+
+    def test_metadata_is_never_sourced_as_shell(self):
+        # A .meta value is untrusted-ish input written by the wrapper; reading it
+        # must not evaluate it. If it were sourced, this would create the file.
+        with tempfile.TemporaryDirectory() as td:
+            canary = Path(td) / "pwned"
+            rid, env = self.make_run(td, project=f"$(touch {canary})")
+            r = self.run_verb(env, "list")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(canary.exists(), "meta value was evaluated as shell")
 
 
 if __name__ == "__main__":

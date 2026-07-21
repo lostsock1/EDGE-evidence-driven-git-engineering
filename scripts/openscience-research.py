@@ -228,6 +228,41 @@ ALLOWED_ACTIONS = {
 }
 
 
+# The packet's own META verdicts are vocabulary the operator never agreed to
+# learn. Translate both to a sentence that says what to DO, keeping the raw
+# value visible above it so the machine-readable form is still auditable.
+PLAIN_ACTION = {
+    "no-action":
+        "nothing here changes what we build. Reject it unless you want the "
+        "background reading kept.",
+    "accept-as-knowledge":
+        "useful background, but no change to the plan. Accept it so it is "
+        "there next time this comes up.",
+    "request-followup":
+        "this did not settle the question. Accept it if the partial answer is "
+        "worth keeping, then ask a sharper follow-up.",
+    "create-architecture-proposal":
+        "strong enough to change the architecture doc. Accept it, then fold it "
+        "into the Superior Architecture and re-bind.",
+    "create-edge-work-order":
+        "strong enough to turn into real code work. Accept it, then dispatch "
+        "the change as a normal work order.",
+}
+PLAIN_CONFIDENCE = {
+    "high": "the research is confident and its sources back it up.",
+    "medium": "the research is reasonably sure, but check the caveats before acting on it.",
+    "low": "the research is NOT sure. Treat this as a lead, not an answer.",
+}
+
+
+def plain_action(act):
+    return PLAIN_ACTION.get(act, f"the packet recommends '{act}' — read it and judge.")
+
+
+def plain_confidence(conf):
+    return PLAIN_CONFIDENCE.get(conf, f"confidence reported as '{conf}'.")
+
+
 def parse_meta(text):
     m = re.search(r'META:\s*(\{.*\})\s*$', text, re.MULTILINE)
     if m:
@@ -400,10 +435,16 @@ def cmd_dispatch(args):
     tag = f"[{project}] " if project else ""
     card = (f"🔬 {tag}Research packet ready: {title}\n"
             f"profile: {profile} · conf: {conf} · recommends: {act} · {model} · variant {variant_label} · {dur}s\n\n"
-            f"{summary}\n\n`{osr}`")
+            f"{summary}\n\n"
+            f"👉 What this means: {plain_confidence(conf)}\n"
+            f"👉 Recommended: {plain_action(act)}\n"
+            f"Accepting files this in the project's knowledge base. It does not "
+            f"write code or change anything — that stays a separate, explicit step.\n\n"
+            f"`{osr}`")
     send_tg(card, thread=rthread,
-            buttons=[("✅ Accept → KB", f"/research accept {handle}"),
-                     ("❌ Reject", f"/research reject {handle}")])
+            buttons=[("✅ Accept — file it in the knowledge base", f"/research accept {handle}"),
+                     ("📄 Read the whole packet first", f"/research show {handle}"),
+                     ("❌ Reject — not worth keeping", f"/research reject {handle}")])
     return 0
 
 

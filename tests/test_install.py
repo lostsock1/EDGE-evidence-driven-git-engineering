@@ -45,6 +45,13 @@ class InstallSmokeTests(unittest.TestCase):
 
             workspace = home / ".openclaw" / "workspace-edge"
             self.assertTrue((workspace / "projects" / "demo" / "notes" / "SUPERIOR_ARCHITECTURE.md").is_file())
+            # Every skill behind a chat button must be installed AND symlinked
+            # into ~/.openclaw/skills, or the buttons that fire it are dead taps.
+            for skill in ("gate", "research", "dispatch"):
+                self.assertTrue((workspace / "skills" / skill / "SKILL.md").is_file(),
+                                f"{skill} skill not installed")
+                self.assertTrue((home / ".openclaw" / "skills" / skill).is_symlink(),
+                                f"{skill} skill not symlinked")
             config = workspace / "config" / "edge-rdd" / "demo.env"
             loaded = subprocess.run(
                 ["bash", "-c", '. "$1"; printf "%s" "$RDD_REPO_DIR"', "bash", str(config)],
