@@ -14,8 +14,9 @@ Send these to the research agent in the project thread:
 | `go` | dispatch the posted work order to the coders |
 | `sweep` | GitHub hygiene pass: open PRs, stale branches, failed runs, doc drift |
 | `answer requests` | work the open items in EDGE_COLLABORATION.md |
+| `/dispatch list` | recent coder runs with their PR and CI state — the way back in when you have lost the thread |
 
-The agent must always reply in the contract shape: plain-lingo summary → your options with tradeoffs → one recommendation with the why.
+The agent must always reply in the contract shape: plain-lingo summary → your options with tradeoffs → one recommendation with the why. When it offers you a choice, it also attaches those choices as buttons — see [Buttons](#buttons-driving-the-loop-without-typing).
 
 ## The gapped lab — running contained experiments
 
@@ -70,7 +71,16 @@ See `lab/README.md` for full documentation.
 ## Reading the completion message
 
 ```
-✅ coder dispatch run-20260703-064023-14383 done (opencode-configured model)
+✅ Coder finished — PR #12 is open
+run run-20260703-064023-14383
+
+👉 What this means: the coder wrote the change, opened a PR, and its own
+   reviewer passed. Nothing is merged and nothing reached main — a PR is
+   just a proposal.
+👉 Recommended: wait for CI. I'll post green or red here on its own, then
+   the merge decision goes to the gate thread.
+
+--- evidence ---
 effort profile: standard
 variant: default
 fallback path: model-a: rate-limited → model-b      <- only when tiers failed
@@ -82,15 +92,67 @@ gate readiness: eligible-for-CI-gate
 commits:
 a1b2c3d Add retrieval parity eval script
 full output: ~/.local/state/edge-rdd/runs/run-...log
+
+[ 🔗 Open PR #12 on GitHub ]
+[ 📄 What did it actually change? ]
+[ 📜 Show the full run log ]
 ```
+
+The top block tells you what happened and what to do. The `--- evidence ---`
+block below it is what makes that claim checkable — it stays deliberately terse
+and literal, because it is the audit trail:
 
 - **effort/variant lines** — which effort profile the dispatch ran at and which opencode variant tier 1 used; the exact model id is in the run log's `=== LOOP CLOSER ===` block.
 - **fallback path** — present only when tiers failed over; a fallback is never silent.
-- **PR: none + no commits** — the run was likely beheaded (see troubleshooting) or the coder stopped at a research boundary; check the run log and `EDGE_COLLABORATION.md`.
+- **PR: none + no commits** — the run was likely beheaded (see troubleshooting) or the coder stopped at a research boundary; check the run log and `EDGE_COLLABORATION.md`. The headline says so plainly and the message offers a "send it back" button.
 - **trailer/reviewer/gate readiness** — non-trivial work needs a parsed Pass/Pass-with-risks verdict. The verdict is model-reported: the wrapper verifies syntax and head SHA, not that an independent reviewer truly ran.
 - **⚠️ OPEN EDGE request(s)** — the coder handed research back; that's the loop working, not a failure. EDGE answers, promotes, re-dispatches.
 
 Then, minutes later, the wrapper reports CI plus reviewer eligibility. The gate independently requires every reported check green, every project-named required context present/pass, and a current-head eligible reviewer marker. No-CI PRs are never chat-mergeable. Merging is always yours.
+
+## Buttons: driving the loop without typing
+
+Every message the loop posts ends at a decision, so every message carries that
+decision's options as inline buttons. You never have to remember a command or
+name a project — the button already knows which run, PR and repo it belongs to.
+
+| Message | Buttons it carries |
+|---|---|
+| Dispatch finished | open the PR · what changed · full log · *send it back* (only when there is no PR or review did not pass) |
+| Dispatch failed, all tiers down | which tiers are alive · retry the same task · full log |
+| CI red | **send it back to the coder** · see failing checks · full log |
+| CI green, review not satisfied | send it back · open PR · what changed |
+| CI green, gate-eligible | **take me to the merge decision** · open PR · what changed |
+| CI never reported | check the verdict now · open PR |
+| Research packet ready | **accept into the KB** · read the whole packet · reject |
+| Heartbeat found a waiting packet / dead research service | read it · accept · reject · check the service |
+| PR gate ask | merge · prune · do-all · snooze (unchanged — the gate has always had these) |
+
+Two of these spend a real model run: **send it back** (`fix`) and **retry**. Both
+are one tap by design, and the message above the button says what the coder will
+be told. Nothing else in the list changes any state.
+
+Tapped buttons arrive as `/dispatch …`, `/research …` or `/gate …` commands and
+are handled by the matching skill. Typing them by hand works identically —
+`/dispatch list` is the way in when you have lost the thread.
+
+### The 58-byte rule
+
+Telegram caps a button's `callback_data` at 64 bytes, and OpenClaw encodes a
+command button as `tgcmd:<command>` — so the command itself must fit in **58
+bytes**. Over that, the channel adapter drops the button with no error in any
+log: the message posts, the button simply is not there. That is why buttons
+carry short run ids and packet handles instead of full paths or OSR ids.
+
+`send_tg` refuses an over-budget button and writes a `WARN button dropped` line
+to the ledger rather than posting an invisible one, and
+`tests/test_dispatch_config.py::ChatButtonTests` fails the build if any command
+in the script would exceed the cap. If you add a button, keep its command short
+and let those two catch you.
+
+Only `command` actions survive the round trip. A `callback` action is encoded as
+an opaque `tgcb1:` payload that the Telegram handler discards when no plugin
+claims it — the button renders, and tapping it does nothing at all.
 
 ## Failure classifications (ledger + failure messages)
 

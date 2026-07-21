@@ -17,6 +17,13 @@
 # Output contract for the heartbeat: if the last line is NO_CHANGE, reply
 # HEARTBEAT_OK and stop. If it is CHANGED, summarize the ATTENTION/BLOCKED lines
 # for the operator. This script never modifies project artifacts.
+#
+# ACTION lines: any finding with a genuine one-tap next step is followed by
+#   ACTION: <label><TAB><slash-command>
+# The heartbeat attaches exactly these as chat buttons on the message it posts,
+# verbatim and in order, and adds none of its own. Findings only the operator can
+# resolve (a missing north star, an un-run experiment) carry no ACTION line by
+# design — offering a button that no skill handles is worse than offering none.
 set -uo pipefail
 
 WS="${RDD_WORKSPACE:-$HOME/.openclaw/workspace-edge}"
@@ -112,24 +119,59 @@ OUT="$(
   fi
 
   # --- 2. research-loop hygiene ------------------------------------------------
+  # ACTION lines: a finding that has a real one-tap next step emits
+  #   ACTION: <label><TAB><slash-command>
+  # directly beneath it. The heartbeat attaches exactly those as chat buttons and
+  # invents none of its own — a button whose command no skill handles is worse
+  # than no button, because a tap that does nothing reads as a broken system.
+  # Only findings the operator can actually act on from a phone get one; a
+  # missing north star or an un-run experiment has no command, so it stays text.
+  emit_action() { printf 'ACTION: %s\t%s\n' "$1" "$2"; }
+
+  # A pending packet is identified on disk by its long OSR id, but the buttons
+  # must carry the short handle: Telegram caps callback_data at 64 bytes and the
+  # full id would overflow it, silently dropping the button.
+  handle_for() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import json, os, pathlib, sys
+state = pathlib.Path(os.environ.get(
+    "RDD_RESEARCH_STATE", pathlib.Path.home() / ".local/state/edge-rdd/research")) / "state.json"
+try:
+    packets = json.loads(state.read_text()).get("packets", {})
+except Exception:
+    raise SystemExit(0)
+print(packets.get(sys.argv[1], {}).get("handle", ""))
+PY
+  }
+
   if [ -d "$XFER/assignments" ]; then
     while IFS= read -r f; do
       echo "ATTENTION: assignment older than 2h never produced a packet (dispatch died?): $(basename "$f")"
+      emit_action "📋 Show the research queue" "/research list"
     done < <(find "$XFER/assignments" -name 'ERA-*.md' -mmin +120 2>/dev/null)
   fi
   if [ -d "$XFER/incoming" ]; then
     while IFS= read -r f; do
-      echo "ATTENTION: packet pending operator Accept/Reject for >24h: $(basename "$f" .md)"
+      osr="$(basename "$f" .md)"
+      echo "ATTENTION: packet pending operator Accept/Reject for >24h: $osr"
+      h="$(handle_for "$osr")"
+      if [ -n "$h" ]; then
+        emit_action "📄 Read the waiting packet" "/research show $h"
+        emit_action "✅ Accept it into the knowledge base" "/research accept $h"
+        emit_action "❌ Reject it" "/research reject $h"
+      fi
     done < <(find "$XFER/incoming" -name 'OSR-*.md' -mmin +1440 2>/dev/null)
   fi
 
   # --- 3. OpenScience health -----------------------------------------------------
   if ! curl -sf -m 8 -o /dev/null "${RDD_RESEARCH_OS_BASE:-http://127.0.0.1:3457}/session"; then
     echo "ATTENTION: OpenScience server is DOWN"
+    emit_action "🩺 Check the research service" "/research status"
   fi
 )"
 
 echo "$OUT"
+# ACTION lines are button specs, not findings — never count them as issues.
 n_issues=$(printf '%s\n' "$OUT" | grep -Ec '^(BLOCKED|ATTENTION|SUGGEST)') || true
 if [ -f "$SNAP" ] && [ "$OUT" = "$(cat "$SNAP")" ]; then
   echo "NO_CHANGE"

@@ -11,6 +11,12 @@ bash {{HOME}}/.openclaw/shared-scripts/rdd-heartbeat-sweep.sh
 - If the last line is `NO_CHANGE`: reply `HEARTBEAT_OK`. Do not repeat known-blocked state.
 - If the last line is `CHANGED`: summarize the `BLOCKED:` / `ATTENTION:` / `SUGGEST:` lines in plain
   language for the operator (what changed, what only the operator can unblock).
+- `ACTION: <label><TAB><command>` lines are **button specs, not findings**. Never read them out as
+  text. Attach each one as an inline button on the summary you post — same order, label and command
+  verbatim — using the `message` tool's `presentation` field:
+  `{"blocks":[{"type":"buttons","buttons":[{"label":"<label>","action":{"type":"command","command":"<command>"}}]}]}`,
+  one block per button. Add no buttons of your own: a finding with no `ACTION:` line has no one-tap
+  next step, and inventing one produces a tap that does nothing.
 - `SUGGEST:` lines are experiment opportunities flagged in a project's `## Open frontier`
   (a load-bearing claim below `field-consensus` with a cheap discriminating test). They are
   **not** blockers: relay them so the operator can green-light a `lab/lab-run.sh` run. The

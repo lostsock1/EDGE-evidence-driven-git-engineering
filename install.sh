@@ -22,6 +22,7 @@
 #   ├── config/opencode/agents/code-monkeys/       (coder, reviewer, _shared)
 #   ├── skills/gate/SKILL.md                       (/gate command)
 #   ├── skills/research/SKILL.md                   (/research command)
+#   ├── skills/dispatch/SKILL.md                   (/dispatch command)
 #   └── scripts/edge-*.sh + openscience-*          (dispatch + research scripts)
 
 set -euo pipefail
@@ -260,7 +261,7 @@ if [ -d "lab" ]; then
 fi
 
 # 6. Skills (workspace-edge/skills/<name>/)
-for sk in gate research; do
+for sk in gate research dispatch; do
   if [ -d "rendered/openclaw/skills/$sk" ]; then
     mkdir -p "$WORKSPACE/skills/$sk"
     cp "rendered/openclaw/skills/$sk/SKILL.md" "$WORKSPACE/skills/$sk/SKILL.md"
@@ -404,7 +405,7 @@ symlink "$CONFIG_DIR" "$HOME/.config/edge-rdd"
 echo "  symlink: ~/.config/edge-rdd -> workspace/config/edge-rdd"
 
 # ~/.openclaw/skills/<name> -> workspace/skills/<name>
-for sk in gate research; do
+for sk in gate research dispatch; do
   symlink "$WORKSPACE/skills/$sk" "$HOME/.openclaw/skills/$sk"
   echo "  symlink: ~/.openclaw/skills/$sk -> workspace/skills/$sk"
 done
@@ -429,7 +430,7 @@ echo "Config:    $CONFIG_DIR/${RDD_PROJECT_SLUG}.env"
 echo ""
 echo "=== MANUAL STEPS REMAINING ==="
 echo "1. Merge rendered/openclaw/agent.edge.json5 into agents.list[] in ~/.openclaw/openclaw.json"
-echo "   (its skills[] includes \"gate\" and \"research\" — keep them so /gate and /research work)"
+echo "   (its skills[] includes \"gate\", \"research\" and \"dispatch\" — keep all three so the loop's buttons work)"
 echo "2. Merge rendered/openclaw/topic.project-thread.json5 into your Telegram group's topics map,"
 echo "   and rendered/openclaw/topic.hub-thread.json5 for the gate/coordination hub thread"
 echo "3. openclaw config validate && systemctl --user restart openclaw-gateway"

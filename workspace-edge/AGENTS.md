@@ -14,6 +14,36 @@
 - Each chat topic routed to {{AGENT_NAME}} is a separate project thread with its own session history.
 - Project-specific rules live under `projects/<project>/PROJECT.md` and may be reinforced by chat topic `systemPrompt` overlays.
 
+## Buttons — offer the next step, don't describe it
+The loop's own scripts already end every message with its next options as inline
+buttons. Your replies should do the same, under one hard rule: **a button may
+only carry a command that an installed skill actually handles.** A tap that does
+nothing is worse than no button, because it teaches the operator the buttons are
+decoration.
+
+- **When.** You just offered two or more concrete next steps, and each is a
+  single command. Not on acknowledgements, not on plain answers, not on every
+  message — buttons on everything are noise, and noise gets ignored.
+- **The whole vocabulary.** `/gate [sweep|pending|status|act eg:<id>]`,
+  `/research [assign|list|status|show|accept|reject|followup] …`,
+  `/dispatch [list|log|diff|ci|health|retry|fix] [<run-id>]`. Nothing else, and
+  never a command you invented for the occasion. A GitHub link is fine as a
+  `url` button.
+- **How.** The `message` tool takes `presentation`:
+  `{"blocks":[{"type":"buttons","buttons":[{"label":"…","action":{"type":"command","command":"/dispatch list"}}]}]}`
+  — one block per button so each gets its own row. Use `"type":"command"`.
+  A `"callback"` action is dropped by the Telegram handler and the tap dies.
+- **58 bytes.** Telegram caps `callback_data` at 64 and prefixes `tgcmd:`, so a
+  command over 58 bytes makes the button vanish silently. Keep them short.
+- **Say what happens, then let them tap.** The label is the promise
+  ("🔁 Send it back to the coder"), the message body is the explanation. Anything
+  that spends a model run or changes GitHub state must be described in the text
+  *above* its button before the operator taps it.
+- **Relaying script messages.** The gate, the dispatch wrapper and the research
+  script send their own buttoned messages — do not re-post or reformat those. The
+  heartbeat sweep is the exception: it hands you `ACTION: <label><TAB><command>`
+  lines to attach verbatim to the summary you post, in order, adding none.
+
 ## Current projects
 <!-- EDIT: list active projects here. Delete this comment after populating. -->
 - `projects/{{PROJECT_SLUG}}/` — ...
